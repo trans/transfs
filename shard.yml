@@ -1,0 +1,19 @@
+name: transfs
+version: 0.1.0
+
+authors:
+  - Thomas Sawyer <transfire@gmail.com>
+
+targets:
+  transfs:
+    main: src/run.cr
+
+crystal: ">= 1.16.0"
+
+license: MIT
+
+dependencies:
+  crystalfuse:
+    github: trans/crystalfuse
+  sqlite3:
+    github: crystal-lang/crystal-sqlite3

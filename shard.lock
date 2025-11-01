@@ -1,0 +1,14 @@
+version: 2.0
+shards:
+  crystalfuse:
+    git: https://github.com/trans/crystalfuse.git
+    version: 0.1.0+git.commit.e248785c7553146ef2af0c33adf8af4d27c17839
+
+  db:
+    git: https://github.com/crystal-lang/crystal-db.git
+    version: 0.13.1
+
+  sqlite3:
+    git: https://github.com/crystal-lang/crystal-sqlite3.git
+    version: 0.21.0
+
