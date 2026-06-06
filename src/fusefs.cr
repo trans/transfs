@@ -1,6 +1,30 @@
 require "crystalfuse"
 require "sqlite3"
 
+# `statvfs(2)` isn't bound by Crystal's stdlib or crystalfuse, so bind it here.
+# The kernel fills this struct, so its size must be >= the real C `statvfs`;
+# the spare array is over-sized on purpose (over-allocation is safe, only
+# under-allocation would let the syscall scribble past it). Field layout
+# mirrors glibc's x86-64 `struct statvfs`.
+lib LibC
+  struct Statvfs
+    f_bsize   : ULong
+    f_frsize  : ULong
+    f_blocks  : ULong
+    f_bfree   : ULong
+    f_bavail  : ULong
+    f_files   : ULong
+    f_ffree   : ULong
+    f_favail  : ULong
+    f_fsid    : ULong
+    f_flag    : ULong
+    f_namemax : ULong
+    __spare   : StaticArray(ULong, 6) # absorbs f_type + __f_spare[5] and any drift
+  end
+
+  fun statvfs(path : Char*, buf : Statvfs*) : Int32
+end
+
 # Local short alias for this project's comfort. The library's own short name is
 # `Crystalfuse::FS`; this just lets us write `Fuse::...`.
 alias Fuse = Crystalfuse
@@ -114,21 +138,27 @@ module TransFS
       end
     end
 
-    # Filesystem statistics, derived from the store's contents.
+    # Filesystem statistics. For a read-only CAS view the only real constraint
+    # is the disk the store sits on, so pass through the backing filesystem's
+    # own `statvfs` for the block/space figures. Inode counts are overlaid with
+    # the store's own content (files tracked, not the backing fs's inodes).
     def statfs(path : String) : Fuse::StatVFS | Int32
+      buf = uninitialized LibC::Statvfs
+      return -Errno::ENOSYS.value unless LibC.statvfs(@root, pointerof(buf)) == 0
+
       num_files = @db.query_one?("SELECT COUNT(*) FROM files", as: Int64) || 0_i64
-      total_size = @db.query_one?("SELECT SUM(size) FROM files", as: Int64) || 0_i64
 
       Fuse::StatVFS.new(
-        bsize: 4096_u64,
-        frsize: 4096_u64,
-        blocks: ((total_size + 4095) // 4096).to_u64,
-        bfree: (512_u64 * 1024),   # 512MB free (placeholder)
-        bavail: (512_u64 * 1024),
+        bsize: buf.f_bsize,
+        frsize: buf.f_frsize,
+        blocks: buf.f_blocks,
+        bfree: buf.f_bfree,
+        bavail: buf.f_bavail,
         files: num_files.to_u64,
-        ffree: 90_000_u64,
-        favail: 90_000_u64,
-        namemax: 255_u64,
+        ffree: buf.f_ffree,
+        favail: buf.f_favail,
+        namemax: buf.f_namemax,
+        flag: buf.f_flag,
       )
     end
 
