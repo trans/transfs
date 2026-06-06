@@ -2,7 +2,7 @@ version: 2.0
 shards:
   crystalfuse:
     git: https://github.com/trans/crystalfuse.git
-    version: 0.1.0+git.commit.e248785c7553146ef2af0c33adf8af4d27c17839
+    version: 0.2.0
 
   db:
     git: https://github.com/crystal-lang/crystal-db.git
