@@ -82,11 +82,27 @@ is the right mental model for a mergeable, eventually-signed system).
 
 ### Encoding
 
-- One claim per line (newline-framed) so a torn trailing write on crash simply
-  fails to parse and is skipped on replay.
-- JSON for now. The encoding is behind a clean line and may later become
-  **C0 DATA** (a preferred format) — nothing in the model depends on JSON, as
-  long as the record stays append-only, one-per-line, torn-tail-detectable.
+The record format is behind a clean line: nothing in the model depends on it, so
+long as records are append-only, one-per-record, and a torn trailing write is
+detectable and skippable on replay.
+
+- **Chosen: C0DATA** (`github:trans/c0data`) as the truth-layer encoding —
+  claim logs *and* manifests. It is a strong fit: its compact form is
+  **canonical by construction** (which is exactly what content-addressed
+  manifest hashes and the create-claim id need — no JSON key-order/whitespace
+  hazard), its record/field separators are the log's native shape, and its
+  scanner is fast (the fold over logs to rebuild the index is scan-bound).
+  Pending **two C0 spec additions** that are correctness-blocking for us
+  (tracked in `~/Projects/c0/transfs-requirements.md`): (1) an **append /
+  record-stream framing** with torn-tail detection (C0 records are
+  start-delimited, so a crash-truncated final record is currently
+  indistinguishable from a complete one); (2) a **canonical-encoding contract**
+  strong enough to hash (minimal-DLE-escaping + defined empty/trailing-field
+  rules — a true logical↔bytes bijection). A strong-but-optional third item is
+  **binary field values** (SO/SI) so 32-byte hashes need not be hex-doubled.
+- **Until those land**, use JSON, one object per line (newline-framed; an
+  unparseable trailing line is skipped on replay). The migration to C0 is a
+  format swap with no model change.
 - **Identity is hashed from canonical VALUES, never from the serialized line.**
   The document id = `sha256(canonical bytes of (ts, nonce))`, not
   `sha256("{...json...}")`. This keeps identity stable across encoding changes.
@@ -375,6 +391,20 @@ mount + inbox now; a friendly GUI sits on the **same core** later. **Hard rule:
 every GUI action equals a CLI/core operation — no GUI-only magic.** So the CLI
 is the complete operational vocabulary of transfs.
 
+**Chosen CLI library: Jargon** (`github:trans/jargon`) — it defines each command
+as a **JSON Schema**, which makes the "CLI is the API" rule *structural* rather
+than aspirational: the schema is one machine-readable contract that both the CLI
+and the future GUI consume (the GUI renders forms from the same schemas it
+validates against, and can even drive the core by piping JSON to `-`). It brings
+subcommands-with-independent-schemas, variadic positionals (our `<q>`),
+`format: path`, shell completions, and "did you mean?" for free. Division of
+labor: **Jargon owns syntax** (shape, types, required, enums); **transfs owns
+semantic resolution** (`<q>` → document, with the recognition list on
+ambiguity — Innovation 2 — which is app logic downstream of parsing). A short
+**Jargon punch-list** transfs surfaces (GUI UI-hint annotations, live
+store-driven completions, an interactive disambiguation seam) is tracked in
+`~/Projects/jargon/transfs-requirements.md`.
+
 Verb catalog (the operational API):
 
 - **in:** `add <file|dir> [--tag] [--name]`; inbox drop
@@ -425,7 +455,10 @@ them cleanly.
   `size`/`type` before fetching content, carry them in the *transfer envelope*
   (a sync manifest), not in the at-rest `version` claim.
 - **GC** (blob mark-sweep; log compaction).
-- **C0 DATA** record encoding (swap-in for JSON).
+- **C0DATA** record encoding — *chosen* (see §3 Encoding), pending two C0 spec
+  additions (append/torn-tail framing; canonical-hashing contract). Start on JSON
+  one-object-per-line; swap to C0 with no model change. Hand-off:
+  `~/Projects/c0/transfs-requirements.md`.
 - **btrfs/ZFS backend experiment** — put the blob store on a btrfs subvolume and
   measure whether native block dedup + checksums + snapshots let us simplify our
   own blob layer. (Dev machine is currently **XFS** — `/dev/nvme0n1p2` — which
