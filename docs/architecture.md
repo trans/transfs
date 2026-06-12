@@ -107,6 +107,32 @@ detectable and skippable on replay.
   The document id = `sha256(canonical bytes of (ts, nonce))`, not
   `sha256("{...json...}")`. This keeps identity stable across encoding changes.
 
+### Durability
+
+**The claim log is transfs's write-ahead log.** Do not build a journal in front
+of it — that would be journaling the journal. A journal *is* "append-only writes
++ a commit marker + a recovery rule that discards anything past the last
+commit," which is exactly what the log already is (C0's ETB stream mode supplies
+the commit marker; the JSON interim uses the newline-framed last-line-skip).
+ETB does **not** make writes atomic — POSIX has no atomic multi-byte append, and
+no journal relies on one. It makes interrupted writes *recoverable*, and
+recoverable + append-only + ordering is how every journal achieves *effective*
+atomicity. Three invariants transfs must enforce on top, because no format can:
+
+1. **fsync discipline.** Write the record + commit marker, `fsync`, and only
+   *then* acknowledge or act on the claim. The marker makes a torn append
+   detectable; fsync ordering decides when it can no longer be lost.
+2. **Write ordering across files.** For "store a blob/manifest, then append a
+   claim referencing it," write the **content first, the claim second**. A crash
+   in between leaves an orphan blob — which in a content-addressed store is
+   *harmless garbage the GC sweeps*, never corruption. This ordering rule is what
+   **replaces any need for a cross-file transaction**: content-addressing turns a
+   would-be multi-file transaction into "write leaves, then write the reference."
+3. **Batch atomicity = N records, one commit marker.** When several claims must
+   land together (or not at all), write them as one block closed by a single
+   marker. Either the whole block replays or none of it does. The block boundary
+   *is* the transaction boundary.
+
 ### Claim catalog
 
 | op | fields | notes |
