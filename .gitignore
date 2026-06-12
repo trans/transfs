@@ -2,3 +2,6 @@
 /bin/
 /.shards/
 *.dwarf
+/docs/api/
+/docs/*.html
+.mcp.json
