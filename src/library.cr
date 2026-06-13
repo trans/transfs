@@ -41,6 +41,32 @@ module TransFS
       Document.load(@root, create.doc_id)
     end
 
+    # Archive a new version of an existing document from a file. Content-first
+    # ordering as in `add`; the new version's parent is the document's current
+    # head (so versions form a fork-detectable DAG, §3).
+    def add_version(doc : Document, filepath : String, ts : Time = Time.utc) : Document
+      content = File.read(filepath).to_slice
+      blob_hex = @cas.put(content)
+      Log.new(@root, doc.id).append(
+        VersionClaim.new(hash: blob_hex, parent: doc.head, ts: ts)
+      )
+      Document.load(@root, doc.id)
+    end
+
+    # Add and/or remove tags (a single tag claim). A no-op if both lists empty.
+    def tag(doc : Document, add : Array(String) = [] of String,
+            del : Array(String) = [] of String, ts : Time = Time.utc) : Document
+      return doc if add.empty? && del.empty?
+      Log.new(@root, doc.id).append(TagClaim.new(add: add, del: del, ts: ts))
+      Document.load(@root, doc.id)
+    end
+
+    # Set the document's blessed label (a name claim; latest wins on fold).
+    def rename(doc : Document, name : String, ts : Time = Time.utc) : Document
+      Log.new(@root, doc.id).append(NameClaim.new(name: name, ts: ts))
+      Document.load(@root, doc.id)
+    end
+
     # Read a document's current content bytes (head version), or nil.
     def read(doc : Document) : Bytes?
       if h = doc.head

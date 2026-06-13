@@ -9,32 +9,42 @@ module TransFS
     getter id : String
     getter name : String?
     getter created_at : Time?
-    getter version_hashes : Array(String)  # content history, oldest-first
+    getter versions : Array(VersionClaim)  # content history, oldest-first
     getter tags : Set(String)
 
     def initialize(@id : String)
       @name = nil
       @created_at = nil
-      @version_hashes = [] of String
+      @versions = [] of VersionClaim
       @tags = Set(String).new
+    end
+
+    # Just the content hashes, oldest-first.
+    def version_hashes : Array(String)
+      @versions.map(&.hash)
     end
 
     # The current content = the newest version's hash (nil if no version yet:
     # the document is a bare shell or a container). §5.
     def head : String?
-      @version_hashes.last?
+      @versions.last?.try(&.hash)
     end
 
     def version_count : Int32
-      @version_hashes.size
+      @versions.size
     end
 
     # Fold a log into a Document. Claims are applied in timestamp order so that
     # a merged log (interleaved from two machines) folds deterministically;
-    # within equal timestamps, file order is kept as the tiebreak for now.
+    # within equal timestamps, **file order** is the tiebreak. The sort key is
+    # `{ts, original_index}` because Crystal's `sort_by` is not stable on its
+    # own — and a batch (`create`+`version`+`name`) shares one timestamp, so
+    # without the index tiebreak the fold order would be undefined.
     def self.fold(id : String, claims : Array(Claim)) : Document
       doc = new(id)
-      claims.sort_by(&.ts).each { |c| doc.apply(c) }
+      claims.map_with_index { |c, i| {c, i} }
+        .sort_by! { |(c, i)| {c.ts, i} }
+        .each { |(c, _)| doc.apply(c) }
       doc
     end
 
@@ -52,7 +62,7 @@ module TransFS
       when CreateClaim
         @created_at = claim.ts
       when VersionClaim
-        @version_hashes << claim.hash
+        @versions << claim
       when NameClaim
         @name = claim.name
       when TagClaim
