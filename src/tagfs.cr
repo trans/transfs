@@ -71,8 +71,10 @@ module TransFS
     hex = hash.hexstring
     prefix = hex[0..1]
 
-    # Destination path
-    target_dir = File.join(store.root, ext, prefix)
+    # Destination path: pure CAS, keyed on content hash alone (no <ext> — the
+    # path must not depend on metadata, or dedup breaks. extension lives in the
+    # index, not the layout). See docs/architecture.md §2.
+    target_dir = File.join(store.root, "blobs", prefix)
     target_path = File.join(target_dir, hex)
 
     # Deduplicate

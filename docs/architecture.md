@@ -55,18 +55,26 @@ It is exposed to the OS through a FUSE mount (via the sibling project
 
 ```
 <root>/
-  blobs/<2hex>/<full-sha256>          content blobs — PURE CAS, hash only
-  .transfs/docs/<2id>/<id>.log        one append-only claim log per document
+  blobs/<hh>/<hex-sha256>             content blobs — PURE CAS, hash only
+  .transfs/docs/<hh>/<hex-id>.log     one append-only claim log per document
   files.db                            the rebuildable SQLite index (disposable)
 ```
+
+**All on-disk names are the lowercase hex encoding** of the underlying 32-byte
+SHA-256 (64 hex chars), and `<hh>` is the **first two hex characters** of that
+same string used as a 256-way fan-out directory. Hex (not base64) so the name in
+a claim *is* its path component with zero conversion — see §3. This applies
+identically to blob hashes and to document ids (a document id is itself a
+SHA-256 — the hash of its `create` claim — so it is hex-encoded and fanned out
+exactly like a blob).
 
 - **Blobs** are keyed by content hash alone. No extension, no name, no document
   id in the path — those would make the location depend on metadata, breaking
   dedup (same bytes → one file) and breaking the property that a CID
   *deterministically computes* its path on every machine.
-- **Logs** are content-addressed too: the document id is the hash of its
-  `create` claim, and the log is named by that id, fanned out by the first 2 hex
-  for the same directory-bloat avoidance as the blob tree.
+- **Logs** are content-addressed too: the document id is the hex of its
+  `create` claim's hash, and the log is named by that id, fanned out by the first
+  two hex chars for the same directory-bloat avoidance as the blob tree.
 - **No other per-document on-disk artifact exists.** Version set, current head,
   tag set, name — all are *folds over the log*, materialized only into the
   disposable index.

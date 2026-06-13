@@ -31,9 +31,11 @@ alias Fuse = Crystalfuse
 
 module TransFS
 
-  # A read-only FUSE view over the content-addressable store. The mount presents
-  # files grouped by extension: `/<ext>/<original_name>`, with the bytes served
-  # from the CAS layout `<root>/<ext>/<2-hex>/<full-hex>`.
+  # A read-only FUSE view over the content-addressable store. The mount presently
+  # presents files grouped by extension (`/<ext>/<original_name>`) — an interim
+  # presentation scheme; the design calls for synthetic query views (`/by-tag/`,
+  # `/by-type/`, …). Bytes are served from the pure-CAS layout
+  # `<root>/blobs/<2-hex>/<full-hex>` (keyed on the content hash alone).
   #
   # Writing through the mount isn't supported yet (files arrive via `transfs
   # add`), so the write-side operations are left at the library's `-ENOSYS`
@@ -100,7 +102,9 @@ module TransFS
       return -Errno::ENOENT.value unless hash
 
       hex = hash.hexstring
-      real_path = File.join(@root, ext, hex[0..1], hex)
+      # Pure-CAS blob path, keyed on the hash alone (no <ext>). Must match the
+      # writer in tagfs.cr. See docs/architecture.md §2.
+      real_path = File.join(@root, "blobs", hex[0..1], hex)
       return -Errno::ENOENT.value unless File.exists?(real_path)
 
       File.open(real_path) do |file|
