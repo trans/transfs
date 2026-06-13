@@ -7,6 +7,8 @@ authors:
 targets:
   transfs:
     main: src/run.cr
+  transfs2:
+    main: src/cli2.cr
 
 crystal: ">= 1.16.0"
 
