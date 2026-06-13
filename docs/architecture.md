@@ -99,8 +99,14 @@ detectable and skippable on replay.
   defined empty/trailing-field rules — a true logical↔bytes bijection) — the one
   remaining blocker, a small spec tightening. Inline binary fields were
   considered and **dropped** (serious complications); transfs **hex-encodes**
-  `hash`/`parent` (64 chars), which was always the fallback — 2× on hash fields
-  only, and it keeps the canonical contract simpler.
+  `hash`/`parent` (64 chars). Hex specifically (not base64) because hex is
+  *already the spelling of the on-disk layout* — `blobs/<2hex>/<hash>` and
+  `.transfs/docs/<2id>/<id>` — so the hash string in a claim **is** its path
+  component with zero conversion, keeping the CAS "the hash is the address"
+  property a pure string op. Cost is 2× on hash fields only. **base64 is parked**
+  as a future log-size optimization *if* logs ever prove hash-heavy (url-safe
+  `-_` alphabet, unpadded, since these strings appear in mount paths) — a clean
+  encoding swap behind the same interface, not needed now.
 - **Until those land**, use JSON, one object per line (newline-framed; an
   unparseable trailing line is skipped on replay). The migration to C0 is a
   format swap with no model change.
