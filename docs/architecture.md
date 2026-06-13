@@ -426,10 +426,14 @@ subcommands-with-independent-schemas, variadic positionals (our `<q>`),
 `format: path`, shell completions, and "did you mean?" for free. Division of
 labor: **Jargon owns syntax** (shape, types, required, enums); **transfs owns
 semantic resolution** (`<q>` → document, with the recognition list on
-ambiguity — Innovation 2 — which is app logic downstream of parsing). A short
-**Jargon punch-list** transfs surfaces (GUI UI-hint annotations, live
-store-driven completions, an interactive disambiguation seam) is tracked in
-`~/Projects/jargon/transfs-requirements.md`.
+ambiguity — Innovation 2 — which is app logic downstream of parsing). Requires
+**Jargon ≥ 0.18**, which blesses `x-` schema-annotation passthrough — the
+mechanism transfs uses to attach **GUI render hints** to commands/fields (e.g.
+"this positional is a document query → search box", "this command is
+destructive → confirm", "this is the inbox add → drop-zone"), carried untouched
+to GUI consumers. Two further asks transfs surfaced — live store-driven
+completions and an interactive disambiguation seam — remain in progress; tracked
+in `~/Projects/jargon/transfs-requirements.md`.
 
 Verb catalog (the operational API):
 
