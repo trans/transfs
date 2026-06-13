@@ -2,6 +2,7 @@ require "crystalfuse"
 require "sqlite3"
 
 # `statvfs(2)` isn't bound by Crystal's stdlib or crystalfuse, so bind it here.
+# (crystalfuse exposes the top-level module `Fuse` since v0.3.0.)
 # The kernel fills this struct, so its size must be >= the real C `statvfs`;
 # the spare array is over-sized on purpose (over-allocation is safe, only
 # under-allocation would let the syscall scribble past it). Field layout
@@ -24,10 +25,6 @@ lib LibC
 
   fun statvfs(path : Char*, buf : Statvfs*) : Int32
 end
-
-# Local short alias for this project's comfort. The library's own short name is
-# `Crystalfuse::FS`; this just lets us write `Fuse::...`.
-alias Fuse = Crystalfuse
 
 module TransFS
 
