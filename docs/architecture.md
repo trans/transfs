@@ -92,14 +92,15 @@ detectable and skippable on replay.
   manifest hashes and the create-claim id need — no JSON key-order/whitespace
   hazard), its record/field separators are the log's native shape, and its
   scanner is fast (the fold over logs to rebuild the index is scan-bound).
-  Pending **two C0 spec additions** that are correctness-blocking for us
-  (tracked in `~/Projects/c0/transfs-requirements.md`): (1) an **append /
-  record-stream framing** with torn-tail detection (C0 records are
-  start-delimited, so a crash-truncated final record is currently
-  indistinguishable from a complete one); (2) a **canonical-encoding contract**
-  strong enough to hash (minimal-DLE-escaping + defined empty/trailing-field
-  rules — a true logical↔bytes bijection). A strong-but-optional third item is
-  **binary field values** (SO/SI) so 32-byte hashes need not be hex-doubled.
+  Status of the C0 spec items transfs needs (tracked in
+  `~/Projects/c0/transfs-requirements.md`): (1) **append / record-stream framing**
+  with torn-tail detection — **delivered** as ETB stream mode in **C0 0.9**;
+  (2) a **canonical-encoding contract** strong enough to hash (minimal-DLE +
+  defined empty/trailing-field rules — a true logical↔bytes bijection) — the one
+  remaining blocker, a small spec tightening. Inline binary fields were
+  considered and **dropped** (serious complications); transfs **hex-encodes**
+  `hash`/`parent` (64 chars), which was always the fallback — 2× on hash fields
+  only, and it keeps the canonical contract simpler.
 - **Until those land**, use JSON, one object per line (newline-framed; an
   unparseable trailing line is skipped on replay). The migration to C0 is a
   format swap with no model change.
@@ -485,9 +486,9 @@ them cleanly.
   `size`/`type` before fetching content, carry them in the *transfer envelope*
   (a sync manifest), not in the at-rest `version` claim.
 - **GC** (blob mark-sweep; log compaction).
-- **C0DATA** record encoding — *chosen* (see §3 Encoding), pending two C0 spec
-  additions (append/torn-tail framing; canonical-hashing contract). Start on JSON
-  one-object-per-line; swap to C0 with no model change. Hand-off:
+- **C0DATA** record encoding — *chosen* (see §3 Encoding). ETB stream framing
+  delivered in C0 0.9; one blocker remains (the canonical-hashing contract).
+  Start on JSON one-object-per-line; swap to C0 with no model change. Hand-off:
   `~/Projects/c0/transfs-requirements.md`.
 - **btrfs/ZFS backend experiment** — put the blob store on a btrfs subvolume and
   measure whether native block dedup + checksums + snapshots let us simplify our
