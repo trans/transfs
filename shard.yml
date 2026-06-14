@@ -21,4 +21,4 @@ dependencies:
     github: crystal-lang/crystal-sqlite3
   jargon:
     github: trans/jargon
-    version: ">= 0.18.0"
+    version: ">= 0.19.0"

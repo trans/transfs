@@ -481,13 +481,13 @@ Here `<q>` is a query/recognition handle, never a raw id.
 file per command under `schemas/`, embedded at compile time via `read_file` so
 the binary is self-contained; each carries `x-ui` render hints for the future
 GUI. Implemented so far: `add`, `addversion`, `rename`, `tag`/`untag`, `list`,
-`find <tag:|type:|name:|bare>`, `cat`, `show`, `versions`, `reindex`. Two notes
-from wiring Jargon (tracked in `~/Projects/jargon/notes/transfs-requirements.md`):
-tag add/remove are **separate commands** (`tag`/`untag`) because a `-tag` removal
-prefix collides with flag syntax; and **`key=value` tags can't yet be passed as
-CLI positionals** (Jargon treats `=`/`:` items as option syntax) — pending a
-Jargon `--`/literal-positional escape. Bare tags work; `key=value` tags are
-reachable via the lib API and will work on the CLI once that lands.
+`find <tag:|type:|name:|bare>`, `cat`, `show`, `versions`, `reindex`. Requires
+**Jargon ≥ 0.19** (its `--` literal-positional support, added in response to a
+transfs requirement, lets `key=value` and leading-dash tag values pass as
+positionals: `tag <id> -- stars=4`). Tag add/remove are **separate commands**
+(`tag`/`untag`) — originally because a `-tag` prefix collided with flag syntax;
+kept because add-vs-remove as distinct verbs reads better than a `+`/`-`
+convention regardless.
 
 ---
 
