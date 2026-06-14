@@ -1,0 +1,12 @@
+description: Archive a file as a new document
+positional: [file, name]
+properties:
+  file:
+    type: string
+    format: path
+    description: File to archive
+    x-ui: { control: file-picker }
+  name:
+    type: string
+    description: Optional blessed label (defaults to the filename)
+required: [file]

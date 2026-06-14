@@ -1,0 +1,8 @@
+description: "Find documents by facet: tag:NAME, type:PREFIX, name:SUBSTR, or a bare name substring"
+positional: [query]
+properties:
+  query:
+    type: string
+    description: "A facet query (tag:/type:/name:) or a bare name substring"
+    x-ui: { control: document-query }
+required: [query]

@@ -19,3 +19,6 @@ dependencies:
     github: trans/crystalfuse
   sqlite3:
     github: crystal-lang/crystal-sqlite3
+  jargon:
+    github: trans/jargon
+    version: ">= 0.18.0"

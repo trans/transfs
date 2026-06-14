@@ -8,6 +8,10 @@ shards:
     git: https://github.com/crystal-lang/crystal-db.git
     version: 0.13.1
 
+  jargon:
+    git: https://github.com/trans/jargon.git
+    version: 0.18.1
+
   sqlite3:
     git: https://github.com/crystal-lang/crystal-sqlite3.git
     version: 0.21.0

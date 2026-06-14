@@ -477,6 +477,18 @@ Verb catalog (the operational API):
 
 Here `<q>` is a query/recognition handle, never a raw id.
 
+**As built (interim `transfs2` CLI).** Subcommands are Jargon schemas, one YAML
+file per command under `schemas/`, embedded at compile time via `read_file` so
+the binary is self-contained; each carries `x-ui` render hints for the future
+GUI. Implemented so far: `add`, `addversion`, `rename`, `tag`/`untag`, `list`,
+`find <tag:|type:|name:|bare>`, `cat`, `show`, `versions`, `reindex`. Two notes
+from wiring Jargon (tracked in `~/Projects/jargon/notes/transfs-requirements.md`):
+tag add/remove are **separate commands** (`tag`/`untag`) because a `-tag` removal
+prefix collides with flag syntax; and **`key=value` tags can't yet be passed as
+CLI positionals** (Jargon treats `=`/`:` items as option syntax) — pending a
+Jargon `--`/literal-positional escape. Bare tags work; `key=value` tags are
+reachable via the lib API and will work on the CLI once that lands.
+
 ---
 
 ## 8. Garbage collection & reachability

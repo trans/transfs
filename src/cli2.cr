@@ -1,11 +1,30 @@
+require "jargon"
 require "./library"
 
-# Interim CLI for the new claim-log core (slice 1: add, list, cat).
-# Hand-rolled for now; to be replaced by Jargon-driven commands once the core
-# is proven (docs/architecture.md §7). Separate from the legacy `transfs`
-# (run.cr/cli.cr) so the old SQL model keeps working during the transition.
+# Interim CLI for the new claim-log core, now driven by Jargon (>= 0.18).
+# Each subcommand's interface is a YAML schema under schemas/, embedded at
+# COMPILE TIME via `read_file` so the binary is self-contained. The schema is
+# the contract both this CLI and a future GUI consume (docs/architecture.md §7);
+# Jargon owns syntax, transfs owns semantic resolution (<id>/query -> document).
+#
+# Separate from the legacy `transfs` (run.cr/cli.cr) during the transition.
 module TransFS
   class CLI2
+    # name => embedded YAML schema (compile-time; no runtime file dependency).
+    SCHEMAS = {
+      "add"        => {{ read_file("#{__DIR__}/../schemas/add.yaml") }},
+      "addversion" => {{ read_file("#{__DIR__}/../schemas/addversion.yaml") }},
+      "rename"     => {{ read_file("#{__DIR__}/../schemas/rename.yaml") }},
+      "tag"        => {{ read_file("#{__DIR__}/../schemas/tag.yaml") }},
+      "untag"      => {{ read_file("#{__DIR__}/../schemas/untag.yaml") }},
+      "list"       => {{ read_file("#{__DIR__}/../schemas/list.yaml") }},
+      "find"       => {{ read_file("#{__DIR__}/../schemas/find.yaml") }},
+      "reindex"    => {{ read_file("#{__DIR__}/../schemas/reindex.yaml") }},
+      "cat"        => {{ read_file("#{__DIR__}/../schemas/cat.yaml") }},
+      "show"       => {{ read_file("#{__DIR__}/../schemas/show.yaml") }},
+      "versions"   => {{ read_file("#{__DIR__}/../schemas/versions.yaml") }},
+    }
+
     def initialize(@root : String)
       @lib = Library.new(@root)
     end
@@ -14,65 +33,89 @@ module TransFS
       ENV["TRANSFS_STORE"]? || File.join(Dir.current, "test", "store")
     end
 
-    def usage
-      puts <<-USAGE
-      Usage: transfs2 [--store DIR] <command> [args]
-
-      Commands:
-        add <file> [name]      Archive a file as a new document
-        addversion <id> <file> Add a new version of an existing document
-        rename <id> <name>     Set a document's name
-        tag <id> [+t] [-t] ... Add (+) and/or remove (-) tags
-        list                   List all documents (from the index)
-        find <query>           Find by tag:/type:/name: (or bare = name)
-        reindex                Rebuild the index from the logs
-        cat <id>               Print a document's current content
-        show <id>              Show a document's folded state
-        versions <id>          Show a document's version history
-      USAGE
-      exit 1
+    def self.build_cli : Jargon::CLI
+      cli = Jargon.new("transfs2")
+      SCHEMAS.each { |name, yaml| cli.subcommand(name, yaml: yaml) }
+      cli
     end
 
-    def run(args : Array(String))
-      usage if args.empty?
-      case args.shift
-      when "add"        then cmd_add(args)
-      when "addversion" then cmd_addversion(args)
-      when "rename"     then cmd_rename(args)
-      when "tag"        then cmd_tag(args)
+    # Dispatch a parsed Jargon result to the matching command.
+    def dispatch(result : Jargon::Result)
+      case result.subcommand
+      when "add"        then cmd_add(result)
+      when "addversion" then cmd_addversion(result)
+      when "rename"     then cmd_rename(result)
+      when "tag"        then cmd_tag(result)
+      when "untag"      then cmd_untag(result)
       when "list"       then cmd_list
-      when "find"       then cmd_find(args)
+      when "find"       then cmd_find(result)
       when "reindex"    then cmd_reindex
-      when "cat"        then cmd_cat(args)
-      when "show"       then cmd_show(args)
-      when "versions"   then cmd_versions(args)
-      else                   usage
+      when "cat"        then cmd_cat(result)
+      when "show"       then cmd_show(result)
+      when "versions"   then cmd_versions(result)
+      else                   abort("unknown command")
       end
     end
 
-    # Resolve an id-prefix arg to a document or abort with a clear message.
+    # --- string / array accessors over Jargon::Result ---
+
+    private def str(result, key) : String
+      result[key]?.try(&.as_s?) || abort("missing argument: #{key}")
+    end
+
+    private def str?(result, key) : String?
+      result[key]?.try(&.as_s?)
+    end
+
+    private def strings(result, key) : Array(String)
+      result[key]?.try(&.as_a?).try(&.map(&.as_s)) || [] of String
+    end
+
     private def resolve(id : String) : Document
       @lib.document(id) || abort("no such document: #{id}")
     rescue ex
       abort(ex.message)
     end
 
-    private def cmd_add(args)
-      file = args.shift? || usage
-      name = args.shift?
-      doc = @lib.add(file, name)
+    # --- commands ---
+
+    private def cmd_add(r)
+      doc = @lib.add(str(r, "file"), str?(r, "name"))
       puts "added #{doc.id[0, 12]}  \"#{doc.name}\"  (#{doc.version_count} version, head #{doc.head.try(&.[0, 12])})"
+    end
+
+    private def cmd_addversion(r)
+      doc = @lib.add_version(resolve(str(r, "id")), str(r, "file"))
+      puts "added version #{doc.head.try(&.[0, 12])} to #{doc.id[0, 12]} (now v#{doc.version_count})"
+    end
+
+    private def cmd_rename(r)
+      doc = @lib.rename(resolve(str(r, "id")), str(r, "name"))
+      puts "renamed #{doc.id[0, 12]} -> \"#{doc.name}\""
+    end
+
+    private def cmd_tag(r)
+      doc = resolve(str(r, "id"))
+      tags = strings(r, "tags")
+      abort("no tags given") if tags.empty?
+      doc = @lib.tag(doc, add: tags)
+      puts "tags: #{doc.tags.to_a.sort.join(", ")}"
+    end
+
+    private def cmd_untag(r)
+      doc = resolve(str(r, "id"))
+      tags = strings(r, "tags")
+      abort("no tags given") if tags.empty?
+      doc = @lib.tag(doc, del: tags)
+      puts "tags: #{doc.tags.to_a.sort.join(", ")}"
     end
 
     private def cmd_list
       print_rows(@lib.index.all)
     end
 
-    # find <query> — query is `tag:finance`, `type:image`, `name:report`, or a
-    # bare token (treated as a name substring). The shared facet language the
-    # mount and GUI will also speak (§7).
-    private def cmd_find(args)
-      q = args.shift? || usage
+    private def cmd_find(r)
+      q = str(r, "query")
       rows =
         case q
         when .starts_with?("tag:")  then @lib.index.by_tag(q[4..])
@@ -88,66 +131,14 @@ module TransFS
       puts "reindexed #{@lib.index.all.size} documents"
     end
 
-    private def print_rows(rows)
-      if rows.empty?
-        puts "(none)"
-        return
-      end
-      rows.each do |r|
-        name = (r.name || "(unnamed)").ljust(24)
-        type = (r.type || "").ljust(16)
-        tags = r.tags.join(",")
-        puts "#{r.id[0, 12]}  #{name}  #{type}  v#{r.version_count}  #{tags}"
-      end
-    end
-
-    private def cmd_addversion(args)
-      id = args.shift? || usage
-      file = args.shift? || usage
-      doc = @lib.add_version(resolve(id), file)
-      puts "added version #{doc.head.try(&.[0, 12])} to #{doc.id[0, 12]} (now v#{doc.version_count})"
-    end
-
-    private def cmd_rename(args)
-      id = args.shift? || usage
-      name = args.shift? || usage
-      doc = @lib.rename(resolve(id), name)
-      puts "renamed #{doc.id[0, 12]} -> \"#{doc.name}\""
-    end
-
-    # tag <id> +finance +q2 -draft   (leading + adds, - removes)
-    private def cmd_tag(args)
-      id = args.shift? || usage
-      doc = resolve(id)
-      add = [] of String
-      del = [] of String
-      args.each do |a|
-        case a[0]?
-        when '+' then add << a[1..]
-        when '-' then del << a[1..]
-        else          add << a # bare token = add
-        end
-      end
-      usage if add.empty? && del.empty?
-      # A tag appearing in both is a no-op; reject it up front (the CLI guard
-      # the design calls for, §3 tag catalog).
-      if (dup = (add & del)).any?
-        abort("tag(s) in both add and remove: #{dup.join(", ")}")
-      end
-      doc = @lib.tag(doc, add: add, del: del)
-      puts "tags: #{doc.tags.to_a.sort.join(", ")}"
-    end
-
-    private def cmd_cat(args)
-      id = args.shift? || usage
-      doc = resolve(id)
-      bytes = @lib.read(doc) || abort("document has no content: #{id}")
+    private def cmd_cat(r)
+      doc = resolve(str(r, "id"))
+      bytes = @lib.read(doc) || abort("document has no content")
       STDOUT.write(bytes)
     end
 
-    private def cmd_show(args)
-      id = args.shift? || usage
-      doc = resolve(id)
+    private def cmd_show(r)
+      doc = resolve(str(r, "id"))
       puts "id:        #{doc.id}"
       puts "name:      #{doc.name}"
       puts "created:   #{doc.created_at}"
@@ -156,9 +147,8 @@ module TransFS
       puts "tags:      #{doc.tags.to_a.sort.join(", ")}"
     end
 
-    private def cmd_versions(args)
-      id = args.shift? || usage
-      doc = resolve(id)
+    private def cmd_versions(r)
+      doc = resolve(str(r, "id"))
       if doc.versions.empty?
         puts "(no versions)"
         return
@@ -169,14 +159,33 @@ module TransFS
         puts "#{marker}v#{i + 1}  #{v.hash[0, 12]}  parent=#{parent}  #{v.ts}"
       end
     end
+
+    private def print_rows(rows)
+      if rows.empty?
+        puts "(none)"
+        return
+      end
+      rows.each do |r|
+        name = (r.name || "(unnamed)").ljust(24)
+        type = (r.type || "").ljust(16)
+        puts "#{r.id[0, 12]}  #{name}  #{type}  v#{r.version_count}  #{r.tags.join(",")}"
+      end
+    end
   end
 end
 
-# Entry point: optional `--store DIR` then the command.
+# Entry point: optional `--store DIR`, then Jargon parses the subcommand.
 args = ARGV.dup
 root = TransFS::CLI2.default_root
 if args.first? == "--store"
   args.shift
   root = args.shift? || abort("--store needs a directory")
 end
-TransFS::CLI2.new(root).run(args)
+
+cli = TransFS::CLI2.build_cli
+result = cli.run(args)
+unless result.valid?
+  STDERR.puts result.errors.join("\n")
+  exit 1
+end
+TransFS::CLI2.new(root).dispatch(result)

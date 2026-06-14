@@ -1,0 +1,8 @@
+description: Print a document's current content
+positional: [id]
+properties:
+  id:
+    type: string
+    description: Document id or unique prefix
+    x-ui: { control: document-query }
+required: [id]

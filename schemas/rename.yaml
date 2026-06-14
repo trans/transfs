@@ -1,0 +1,11 @@
+description: Set a document's blessed label
+positional: [id, name]
+properties:
+  id:
+    type: string
+    description: Document id or unique prefix
+    x-ui: { control: document-query }
+  name:
+    type: string
+    description: New name
+required: [id, name]

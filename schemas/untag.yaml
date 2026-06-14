@@ -1,0 +1,12 @@
+description: Remove tags from a document
+positional: [id, tags]
+properties:
+  id:
+    type: string
+    description: Document id or unique prefix
+    x-ui: { control: document-query }
+  tags:
+    type: array
+    description: Tags to remove
+    x-ui: { control: tag-chooser }
+required: [id, tags]

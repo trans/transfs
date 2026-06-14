@@ -1,0 +1,13 @@
+description: Add a new version of an existing document
+positional: [id, file]
+properties:
+  id:
+    type: string
+    description: Document id or unique prefix
+    x-ui: { control: document-query }
+  file:
+    type: string
+    format: path
+    description: File holding the new content
+    x-ui: { control: file-picker }
+required: [id, file]
