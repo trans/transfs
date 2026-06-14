@@ -1,0 +1,10 @@
+description: Mount the store as a read-only FUSE filesystem (foreground)
+positional: [mountpoint]
+properties:
+  mountpoint:
+    type: string
+    format: path
+    description: Directory to mount at
+    x-ui: { control: file-picker }
+x-ui: { service: true }
+required: [mountpoint]

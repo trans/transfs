@@ -93,6 +93,13 @@ module TransFS
       end
     end
 
+    # The on-disk path of a content blob (by hex hash). For readers that want to
+    # stream/seek the blob directly (e.g. the FUSE mount's zero-copy read) rather
+    # than load it whole via `read`.
+    def blob_path(hex : String) : String
+      @cas.path_for(hex)
+    end
+
     def documents : Array(Document)
       Document.all(@root)
     end

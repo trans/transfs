@@ -58,7 +58,9 @@ module TransFS
         puts "Mount Point: #{store.mountpoint}"
 
       when "mount"
-        FuseSystem.mount(store)
+        # The mount moved to the new claim-log model — use `transfs2 mount`.
+        STDERR.puts "mount has moved to the new model: run `transfs2 mount`"
+        exit 1
 
       else
         usage

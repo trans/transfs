@@ -1,5 +1,6 @@
 require "jargon"
 require "./library"
+require "./fusefs"
 
 # Interim CLI for the new claim-log core, now driven by Jargon (>= 0.18).
 # Each subcommand's interface is a YAML schema under schemas/, embedded at
@@ -23,6 +24,7 @@ module TransFS
       "cat"        => {{ read_file("#{__DIR__}/../schemas/cat.yaml") }},
       "show"       => {{ read_file("#{__DIR__}/../schemas/show.yaml") }},
       "versions"   => {{ read_file("#{__DIR__}/../schemas/versions.yaml") }},
+      "mount"      => {{ read_file("#{__DIR__}/../schemas/mount.yaml") }},
     }
 
     def initialize(@root : String)
@@ -53,6 +55,7 @@ module TransFS
       when "cat"        then cmd_cat(result)
       when "show"       then cmd_show(result)
       when "versions"   then cmd_versions(result)
+      when "mount"      then cmd_mount(result)
       else                   abort("unknown command")
       end
     end
@@ -129,6 +132,15 @@ module TransFS
     private def cmd_reindex
       @lib.index.rebuild
       puts "reindexed #{@lib.index.all.size} documents"
+    end
+
+    private def cmd_mount(r)
+      mp = str(r, "mountpoint")
+      abort("mountpoint does not exist: #{mp}") unless Dir.exists?(mp)
+      # `-o ro` makes the kernel itself reject writes with EROFS (the honest
+      # "read-only filesystem" signal) before they reach us — the structural
+      # enforcement of "don't edit through the mount" (docs §7).
+      FuseSystem.new(@lib).mount(["transfs", "-f", "-o", "ro", mp])
     end
 
     private def cmd_cat(r)
