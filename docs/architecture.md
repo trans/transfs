@@ -525,6 +525,20 @@ them cleanly.
   created, not the current mount.) The document/claim/merge model lives above
   any FS regardless; this is a backend optimization only.
 - **Manifest extras** — file mode / exec bit, symlink entries.
+- **Index hash encoding: TEXT vs BLOB benchmark** — the index currently stores
+  ids/hashes as hex `TEXT` (debuggable during build-out). BLOB (32 raw bytes)
+  would halve them and shrink B-tree keys (smaller index, better page-cache
+  density) — but a SHA-256 is 256-bit so it can never be a SQLite `INTEGER`;
+  the only choice is TEXT vs BLOB, and conversion cost is negligible either way,
+  so the real axis is key-size efficiency vs. inspectability. Decide
+  *empirically*, but only once the test is valid: write a **benchmark harness**
+  (NOT switchable production code — a throwaway that builds the index both ways)
+  with **synthetic volume (~100K docs)** and a **realistic reader (the mount's
+  getattr/find loop)**, measuring db size + lookup/query latency. Benchmarking
+  now (≈3 docs, no mount) would measure noise and falsely say "marginal." If
+  BLOB's win is marginal at scale, keep TEXT for debuggability; else flip
+  (one-line-per-column + `reindex`, zero migration — the index is a rebuildable
+  cache and the rebuild-identical path is already spec'd).
 
 ## 10. Settled rejections (do not relitigate)
 
