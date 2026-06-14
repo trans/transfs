@@ -23,7 +23,9 @@ module TransFS
         addversion <id> <file> Add a new version of an existing document
         rename <id> <name>     Set a document's name
         tag <id> [+t] [-t] ... Add (+) and/or remove (-) tags
-        list                   List all documents (folded from their logs)
+        list                   List all documents (from the index)
+        find <query>           Find by tag:/type:/name: (or bare = name)
+        reindex                Rebuild the index from the logs
         cat <id>               Print a document's current content
         show <id>              Show a document's folded state
         versions <id>          Show a document's version history
@@ -39,6 +41,8 @@ module TransFS
       when "rename"     then cmd_rename(args)
       when "tag"        then cmd_tag(args)
       when "list"       then cmd_list
+      when "find"       then cmd_find(args)
+      when "reindex"    then cmd_reindex
       when "cat"        then cmd_cat(args)
       when "show"       then cmd_show(args)
       when "versions"   then cmd_versions(args)
@@ -61,14 +65,39 @@ module TransFS
     end
 
     private def cmd_list
-      docs = @lib.documents
-      if docs.empty?
-        puts "(no documents)"
+      print_rows(@lib.index.all)
+    end
+
+    # find <query> — query is `tag:finance`, `type:image`, `name:report`, or a
+    # bare token (treated as a name substring). The shared facet language the
+    # mount and GUI will also speak (§7).
+    private def cmd_find(args)
+      q = args.shift? || usage
+      rows =
+        case q
+        when .starts_with?("tag:")  then @lib.index.by_tag(q[4..])
+        when .starts_with?("type:") then @lib.index.by_type(q[5..])
+        when .starts_with?("name:") then @lib.index.by_name(q[5..])
+        else                             @lib.index.by_name(q)
+        end
+      print_rows(rows)
+    end
+
+    private def cmd_reindex
+      @lib.index.rebuild
+      puts "reindexed #{@lib.index.all.size} documents"
+    end
+
+    private def print_rows(rows)
+      if rows.empty?
+        puts "(none)"
         return
       end
-      docs.sort_by! { |d| d.created_at || Time.unix(0) }
-      docs.each do |d|
-        puts "#{d.id[0, 12]}  #{(d.name || "(unnamed)").ljust(24)}  v#{d.version_count}  #{d.tags.to_a.join(",")}"
+      rows.each do |r|
+        name = (r.name || "(unnamed)").ljust(24)
+        type = (r.type || "").ljust(16)
+        tags = r.tags.join(",")
+        puts "#{r.id[0, 12]}  #{name}  #{type}  v#{r.version_count}  #{tags}"
       end
     end
 

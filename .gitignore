@@ -5,3 +5,6 @@
 /docs/api/
 /docs/*.html
 .mcp.json
+# the index is a rebuildable cache, never committed
+.transfs/index.db
+**/.transfs/index.db

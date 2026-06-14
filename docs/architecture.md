@@ -288,6 +288,20 @@ The SQLite index is a **fold over the logs and manifests**, rebuildable at any
 time, and deliberately **denormalized** so facet queries and the
 collision-neighborhood lookup (see §7) are instant.
 
+> **Implementation note (as built).** Two deliberate deviations from the DDL
+> below, both justified by the index being a disposable cache rather than the
+> truth layer: (1) ids/hashes are stored as **hex `TEXT`**, not `BLOB` —
+> debuggable with the `sqlite3` CLI, no hex↔bytes conversion at boundaries, and
+> the rest of the codebase already speaks hex; 32 bytes/row is irrelevant for a
+> personal archive's metadata. (2) the index lives at
+> **`<root>/.transfs/index.db`**, not `<root>/files.db` — the legacy SQL model
+> still owns `files.db` during the transition. Opening a missing index rebuilds
+> it from the logs; every mutating op writes its document's rows through, so the
+> index stays fresh across separate CLI processes. `type`/`size` are derived on
+> fold (size from the blob; type currently from the name's extension — real
+> content-sniffing is a later refinement). `membership` is created but unpopulated
+> until composites exist.
+
 ```sql
 -- one materialized facet row per document
 CREATE TABLE documents (

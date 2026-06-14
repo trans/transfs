@@ -2,6 +2,7 @@ require "./cas"
 require "./claim"
 require "./log"
 require "./document"
+require "./index"
 
 module TransFS
   # The claim-log core: the operations that the CLI (and later the GUI, and the
@@ -10,9 +11,17 @@ module TransFS
   # proven and the old one retired.
   class Library
     getter root : String
+    @index : Index?
 
     def initialize(@root : String)
       @cas = CAS.new(@root)
+      @index = nil
+    end
+
+    # The materialized facet index. Lazily opened (and self-rebuilt if missing),
+    # so pure log operations don't pay for it unless a query needs it.
+    def index : Index
+      @index ||= Index.new(@root)
     end
 
     # Archive a file as a new document (one create claim + one version claim,
@@ -38,7 +47,7 @@ module TransFS
       # one committed batch: create + version + name
       log.append(create, version, name_claim)
 
-      Document.load(@root, create.doc_id)
+      reindex(Document.load(@root, create.doc_id))
     end
 
     # Archive a new version of an existing document from a file. Content-first
@@ -50,7 +59,7 @@ module TransFS
       Log.new(@root, doc.id).append(
         VersionClaim.new(hash: blob_hex, parent: doc.head, ts: ts)
       )
-      Document.load(@root, doc.id)
+      reindex(Document.load(@root, doc.id))
     end
 
     # Add and/or remove tags (a single tag claim). A no-op if both lists empty.
@@ -58,13 +67,23 @@ module TransFS
             del : Array(String) = [] of String, ts : Time = Time.utc) : Document
       return doc if add.empty? && del.empty?
       Log.new(@root, doc.id).append(TagClaim.new(add: add, del: del, ts: ts))
-      Document.load(@root, doc.id)
+      reindex(Document.load(@root, doc.id))
     end
 
     # Set the document's blessed label (a name claim; latest wins on fold).
     def rename(doc : Document, name : String, ts : Time = Time.utc) : Document
       Log.new(@root, doc.id).append(NameClaim.new(name: name, ts: ts))
-      Document.load(@root, doc.id)
+      reindex(Document.load(@root, doc.id))
+    end
+
+    # Write the index row for one document through after every mutation, so the
+    # persistent index stays fresh across separate CLI processes (each command
+    # is its own process; a mutation that didn't write through would leave the
+    # next query stale). Opening the index is cheap; if index.db is missing it
+    # rebuilds itself from the logs first, then this upsert is idempotent.
+    private def reindex(doc : Document) : Document
+      index.index_document(doc)
+      doc
     end
 
     # Read a document's current content bytes (head version), or nil.

@@ -148,4 +148,63 @@ module TransFS
       end
     end
   end
+
+  describe Index do
+    it "lists documents materialized from the logs" do
+      with_store do |fs|
+        with_file("a") { |f| fs.add(f, "alpha.txt") }
+        with_file("b") { |f| fs.add(f, "beta.txt") }
+        fs.index.all.map(&.name).compact.sort.should eq ["alpha.txt", "beta.txt"]
+      end
+    end
+
+    it "splits key=value tags into (key, value) and keeps booleans null" do
+      with_store do |fs, root|
+        with_file("x") do |f|
+          doc = fs.add(f)
+          fs.tag(doc, add: ["finance", "stars=4"])
+          idx = Index.new(root)
+          # boolean tag: queryable by key
+          idx.by_tag("finance").map(&.id).should eq [doc.id]
+          # key=value tag: rendered back as stars=4 in the row's tag list
+          idx.by_tag("stars").first.tags.should contain "stars=4"
+        end
+      end
+    end
+
+    it "finds by type derived from the name" do
+      with_store do |fs|
+        with_file("img") { |f| fs.add(f, "pic.jpg") }
+        with_file("doc") { |f| fs.add(f, "paper.pdf") }
+        fs.index.by_type("image").map(&.name).should eq ["pic.jpg"]
+      end
+    end
+
+    it "rebuilds identically from the logs after the db is deleted" do
+      with_store do |fs, root|
+        with_file("a") { |f| fs.add(f, "one.txt") }
+        with_file("b") do |f|
+          doc = fs.add(f, "two.txt")
+          fs.tag(doc, add: ["t"])
+        end
+        before = fs.index.all
+        fs.index.close
+
+        File.delete(File.join(root, ".transfs", "index.db"))
+        after = Index.new(root).all # opening rebuilds from logs
+
+        before.map(&.id).sort.should eq after.map(&.id).sort
+        before.size.should eq after.size
+      end
+    end
+
+    it "exposes the collision neighborhood (same name) for disambiguation" do
+      with_store do |fs|
+        with_file("1") { |f| fs.add(f, "report.txt") }
+        with_file("2") { |f| fs.add(f, "report.txt") }
+        with_file("3") { |f| fs.add(f, "other.txt") }
+        fs.index.neighborhood("report.txt", "text/plain").size.should eq 2
+      end
+    end
+  end
 end
