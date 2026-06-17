@@ -3,6 +3,7 @@ require "sqlite3"
 require "mime"
 require "./cas"
 require "./document"
+require "./query"
 
 module TransFS
   # The SQLite index: a *materialized facet view* folded from the claim logs
@@ -163,6 +164,17 @@ module TransFS
     record Row, id : String, name : String?, type : String?, size : Int64?,
       version_count : Int32, date_added : String, tags : Array(String)
 
+    # Like Row, but carries head_hash so the query-path mount can serve a leaf's
+    # bytes index-only (no log re-fold in getattr/read). Returned by #match.
+    record Row2, id : String, name : String?, type : String?, size : Int64?,
+      version_count : Int32, date_added : String, head_hash : String?,
+      tags : Array(String)
+
+    # Facet keys that are columns on `documents` rather than tags. A `key=value`
+    # predicate whose key is here matches the column; otherwise it's a tag.
+    # (Allowlist — only these names are ever interpolated into SQL.)
+    STRUCTURAL = {"type", "name", "owner"}
+
     def all : Array(Row)
       query_rows("SELECT id, name, type, size, version_count, date_added " \
                  "FROM documents ORDER BY date_added")
@@ -200,6 +212,65 @@ module TransFS
       end
     end
 
+    # The generalized query behind the query-path mount (§7): AND together one
+    # predicate per path segment and return the matching documents. Predicates
+    # commute (the AND is order-independent); an empty list matches all documents
+    # (the root query). Dynamic SQL with bound args — never string-interpolated
+    # values; only the STRUCTURAL column names (an allowlist) are interpolated.
+    def match(predicates : Array(Predicate)) : Array(Row2)
+      joins = [] of String
+      wheres = [] of String
+      join_args = [] of DB::Any
+      where_args = [] of DB::Any
+      tag_n = 0
+
+      predicates.each do |p|
+        if (key = p.key)
+          if STRUCTURAL.includes?(key)
+            if key == "type"
+              # Friendly type match so `pdf`/`image` work against the full MIME:
+              # exact, major (`image/%`), or subtype (`%/pdf`).
+              wheres << "(d.type = ? OR d.type LIKE ? OR d.type LIKE ?)"
+              where_args << p.value << "#{p.value}/%" << "%/#{p.value}"
+            else
+              wheres << "d.#{key} = ?" # key from STRUCTURAL allowlist only
+              where_args << p.value
+            end
+          else
+            # A pinned tag predicate: one aliased join per tag so multiple tag
+            # predicates AND correctly (doc_tags PK => at most one match, no dup).
+            a = "t#{tag_n}"
+            tag_n += 1
+            joins << "JOIN doc_tags #{a} ON #{a}.doc_id = d.id " \
+                     "AND #{a}.key = ? AND #{a}.value = ?"
+            join_args << key << p.value
+          end
+        else
+          # Bare value: OR across facets (parenthesized, so it ANDs with the rest
+          # as a unit). EXISTS — not joins — because a doc may match >1 arm.
+          wheres << "(d.type = ? OR d.type LIKE ? OR d.type LIKE ? " \
+                    "OR EXISTS (SELECT 1 FROM doc_tags b WHERE b.doc_id = d.id " \
+                    "AND b.key = ? AND b.value IS NULL) " \
+                    "OR EXISTS (SELECT 1 FROM doc_tags b WHERE b.doc_id = d.id " \
+                    "AND b.value = ?))"
+          where_args << p.value << "#{p.value}/%" << "%/#{p.value}" \
+            << p.value << p.value
+        end
+      end
+
+      sql = String.build do |s|
+        s << "SELECT d.id, d.name, d.type, d.size, d.version_count, " \
+             "d.date_added, d.head_hash FROM documents d"
+        joins.each { |j| s << ' ' << j }
+        s << " WHERE " << wheres.join(" AND ") unless wheres.empty?
+        s << " ORDER BY d.date_added"
+      end
+
+      # JOIN placeholders precede WHERE placeholders in the assembled SQL, so the
+      # bound args must be join_args first, then where_args.
+      query_rows2(sql, join_args + where_args)
+    end
+
     private def query_rows(sql : String, *args) : Array(Row)
       rows = [] of Row
       @db.query(sql, *args) do |rs|
@@ -211,6 +282,23 @@ module TransFS
           vc = rs.read(Int32 | Int64).to_i32
           date = rs.read(String)
           rows << Row.new(id, name, type, size, vc, date, tags_for(id))
+        end
+      end
+      rows
+    end
+
+    private def query_rows2(sql : String, args : Array(DB::Any)) : Array(Row2)
+      rows = [] of Row2
+      @db.query(sql, args: args) do |rs|
+        rs.each do
+          id = rs.read(String)
+          name = rs.read(String?)
+          type = rs.read(String?)
+          size = rs.read(Int64?)
+          vc = rs.read(Int32 | Int64).to_i32
+          date = rs.read(String)
+          head = rs.read(String?)
+          rows << Row2.new(id, name, type, size, vc, date, head, tags_for(id))
         end
       end
       rows

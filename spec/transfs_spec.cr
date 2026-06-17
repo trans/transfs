@@ -149,6 +149,32 @@ module TransFS
     end
   end
 
+  describe Query do
+    it "parses bare and key=value segments; root is empty" do
+      Query.parse("/").should be_empty
+      Query.parse("/vacation").should eq [Predicate.new(nil, "vacation")]
+      Query.parse("/type=pdf").should eq [Predicate.new("type", "pdf")]
+    end
+
+    it "drops empty segments (leading/trailing/double slash)" do
+      Query.parse("//a///b/").map(&.value).should eq ["a", "b"]
+    end
+
+    it "treats descending segments as commutative" do
+      Query.parse("/a/b").sort_by(&.value).should eq Query.parse("/b/a").sort_by(&.value)
+    end
+
+    it "splits on the first '=' and keeps later ones in the value" do
+      Query.segment("stars=4").should eq Predicate.new("stars", "4")
+      Query.segment("k=a=b").should eq Predicate.new("k", "a=b")
+    end
+
+    it "treats no-'=' and a leading '=' (deferred breakdown) as a bare value" do
+      Query.segment("c++").should eq Predicate.new(nil, "c++")
+      Query.segment("=x").should eq Predicate.new(nil, "=x")
+    end
+  end
+
   describe Index do
     it "lists documents materialized from the logs" do
       with_store do |fs|
@@ -204,6 +230,49 @@ module TransFS
         with_file("2") { |f| fs.add(f, "report.txt") }
         with_file("3") { |f| fs.add(f, "other.txt") }
         fs.index.neighborhood("report.txt", "text/plain").size.should eq 2
+      end
+    end
+
+    describe "#match" do
+      it "filters by bare values, key=value, and their AND" do
+        with_store do |fs|
+          a = b = c = ""
+          with_file("pdf") { |f| d = fs.add(f, "a.pdf"); fs.tag(d, add: ["vacation", "year=1920"]); a = d.id }
+          with_file("jpg") { |f| d = fs.add(f, "b.jpg"); fs.tag(d, add: ["vacation"]); b = d.id }
+          with_file("txt") { |f| d = fs.add(f, "c.txt"); fs.tag(d, add: ["year=2020", "stars=4"]); c = d.id }
+          idx = fs.index
+          ids = ->(preds : Array(Predicate)) { idx.match(preds).map(&.id).sort }
+
+          # bare value -> a boolean tag key
+          ids.call([Predicate.new(nil, "vacation")]).should eq [a, b].sort
+          # bare value -> a tag value
+          ids.call([Predicate.new(nil, "1920")]).should eq [a]
+          # bare value -> friendly type (subtype, then major)
+          ids.call([Predicate.new(nil, "pdf")]).should eq [a]
+          ids.call([Predicate.new(nil, "image")]).should eq [b]
+          # key=value tag
+          ids.call([Predicate.new("year", "1920")]).should eq [a]
+          ids.call([Predicate.new("stars", "4")]).should eq [c]
+          # structural key=value (name, friendly type)
+          ids.call([Predicate.new("name", "a.pdf")]).should eq [a]
+          ids.call([Predicate.new("type", "pdf")]).should eq [a]
+          # AND across predicates, and its commutativity
+          ids.call([Predicate.new(nil, "vacation"), Predicate.new("year", "1920")]).should eq [a]
+          ids.call([Predicate.new("year", "1920"), Predicate.new(nil, "vacation")]).should eq [a]
+          # empty -> all documents; no match -> empty
+          ids.call([] of Predicate).should eq [a, b, c].sort
+          ids.call([Predicate.new("year", "9999")]).should be_empty
+        end
+      end
+
+      it "carries head_hash so a leaf can be served index-only" do
+        with_store do |fs|
+          with_file("body") do |f|
+            doc = fs.add(f, "a.pdf")
+            row = fs.index.match([Predicate.new("name", "a.pdf")]).first
+            row.head_hash.should eq doc.head
+          end
+        end
       end
     end
   end
