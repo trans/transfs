@@ -3,9 +3,11 @@
 > Status: **design**, pre-implementation. This document is the source of intent
 > for transfs's storage model, claim format, index, and UX. It is the reference
 > the code should conform to (and be corrected against). Last substantial
-> revision: 2026-06-12 (analysis pass: trimmed `version` to {hash,parent,ts};
-> composites unified as `tree`/`collection` manifests, membership-via-versioning;
-> tags-vs-collections rule).
+> revision: 2026-06-16 (query-path mount design pass: settled the path grammar,
+> the composite-boundary semantics, and the two transfer/packaging artifacts —
+> see §7 "The query-path mount". Prior substantial revision 2026-06-12: trimmed
+> `version` to {hash,parent,ts}; composites unified as `tree`/`collection`
+> manifests, membership-via-versioning; tags-vs-collections rule.)
 >
 > Note: this hand-written design doc lives at `docs/architecture.md` and is
 > tracked. If you later run `crystal docs`, send generated API HTML to a
@@ -372,11 +374,11 @@ tag-path) — that is **recall**. Survivors (Gmail, Apple Photos, git) trade on
 
 ### Two innovations
 
-**1. The query is the handle.** A mount path
-`/by-tag/finance/2026/report.pdf` *is* a conjunctive query; the CLI speaks the
-same language: `transfs checkout finance 2026 report` narrows by query (one
-match → act; several → a recognition list; zero → say so). A git-style
-short-id prefix remains as a power/script escape hatch.
+**1. The query is the handle.** A mount path `/finance/2026/report.pdf` *is* a
+conjunctive query (each segment narrows; see "The query-path mount" below for the
+grammar); the CLI speaks the same language: `transfs checkout finance 2026 report`
+narrows by query (one match → act; several → a recognition list; zero → say so).
+A git-style short-id prefix remains as a power/script escape hatch.
 
 **2. A document's displayed name is the shortest description that
 distinguishes it in context — computed, not assigned.** Like "the John in
@@ -427,9 +429,10 @@ Making it a normal read-write folder fights the architecture (drag-in → which
 doc/name/tags? save → a silent new version the user didn't model; two files
 named `report.md` can't coexist in a folder but can in the store). So:
 
-- **Read** (browse, open, copy out): rich synthetic views — `/by-tag/`,
-  `/by-type/`, collections, `/versions/` — the same document visible under many
-  without duplication.
+- **Read** (browse, open, copy out): rich synthetic views — every path *is* a
+  query (`/finance/2026/`), composites render as directories, and the same
+  document is visible under many queries without duplication. See "The query-path
+  mount" below for the grammar and the composite boundary.
 - **Add**: one obvious safe spot, the **inbox**, where "drop = archive a new
   document" is unambiguous. Elsewhere the mount is read-only and *honest* about
   it (you discover you can't save-in-place early and clearly, not late and
@@ -438,6 +441,193 @@ named `report.md` can't coexist in a folder but can in the store). So:
   copy-on-write reality visible and intentional ("git for files"). A future
   one-shot `edit <doc> <cmd>` (checkout → run → checkin) is the seam the GUI
   leans on to hide the round-trip.
+
+### The query-path mount
+
+This is the concrete realization of Innovation 1 (the *navigable* handle layer,
+§4). **Status: the grammar, the composite boundary, and the transfer artifacts
+below are settled (2026-06-16); recognition-navigation, boolean OR/NOT, version
+addressing, and listing-scale are still open — see "Open knots" at the end.**
+The current `/<mime-type>/<name>` mount is a deliberate stopgap this replaces.
+
+**The path *is* the query.** Each `/`-separated segment narrows the set;
+descending = **AND**; segments **commute** (`/vacation/1920/` and
+`/1920/vacation/` are the same set). The grammar deliberately bottoms out at
+*bare values*, because navigation should be recognition (type what you remember),
+not recall (type the schema-correct form).
+
+| segment form | meaning | examples |
+|---|---|---|
+| `value` | bare, **exact**, matched against the **value space across all facets** (a boolean tag's key *is* its value, so `vacation` matches `vacation=true`) | `vacation` `1920` `pdf` |
+| `*pat*` `?` | glob over the same value space (fnmatch) | `*report*` `202?` |
+| `key=value` | exact, **pinned** to one facet | `year=1920` `type=pdf` |
+| `key=*pat*` | glob, pinned facet (the value's glob-ness flips the segment to pattern; `=` still only *pins*) | `name=*report*` |
+| `key=value+` / `key=value-` | **deferred** — range bound ≥ / ≤ on a numeric facet; a range is the AND of two bounds (`/size=100+/size=500-/`) | — |
+
+Why these choices:
+
+- **One separator, `=`.** It is the *same string you used to create a kv-tag*
+  (`tag … -- stars=4` ⇒ navigate `/stars=4/`): input and query spelling are
+  identical, zero translation. A `:` facet separator was considered and dropped —
+  unneeded once `=` carries facet-pinning, and it would have cost the `<`/`>`
+  characters we'd want for ranges.
+- **`+`/`-` for range bounds, never `<`/`>`.** Unquoted in a shell, `>` is
+  *redirection* — `ls /mnt/size>100KB` silently creates a file named `100KB`
+  rather than erroring. `+`/`-` are shell-safe. Bounds are deferred from the first
+  cut, but when added they take this shell-safe form and compose via AND for
+  ranges (no `±` glyph — composing two bounds reuses the AND rule we already have).
+- **Globs need quoting to reach us** (`ls '/mnt/*report*'`), exactly as
+  `find -name '*.txt'` does — the shell otherwise expands `*`/`?` against the live
+  listing first. `*` and `?` are the advertised surface; `[...]`/`{a,b}` work
+  quietly (suppressing them would be pointless effort). Suffixing `+`/`-` is an
+  operator **only on numeric/ordered facets** (an index-side determination); on a
+  string facet a trailing `+`/`-` is a literal character (so a tag `c++` survives).
+- **Direct access falls out of the same grammar** as the identity facets
+  `doc=<id-or-prefix>` / `blob=<hash>`. A discriminator is required because a
+  document id and a blob hash are *both* 64-hex SHA-256 strings, so a bare hash is
+  ambiguous. (Exact spelling follows the `=` grammar; not separately ratified.)
+
+**Results vs. breakdown (recognition-navigation).** A query dir is **two modes**,
+and the user denotes which:
+
+- **Results (default).** `ls vacation/2026/` lists the matching **documents**,
+  nothing else — a clean wall, no facet folders cluttering it. This is the common
+  case and it stays pure.
+- **Breakdown (explicitly asked for).** The same `=` is the **enumerate** marker.
+  Read `key=value` as a two-slot atom; **an empty slot means "enumerate that
+  slot":**
+  - `type=` → the **values** of `type` present here (`pdf/ jpg/ png/`);
+  - `=` → **all keys** — the generic dimension menu (what `/=/` shows);
+  - `=value` (e.g. `=5+`) → the **keys** that take such a value ("which
+    dimensions go above 5 here") — the dual; it rides the deferred `+`/`-` range
+    syntax, so it lands when ranges do.
+
+A bare segment (`pdf`, no `=`) stays a plain **filter** — the *empty-slot* `=` is
+the entire breakdown signal, so there is no value-vs-breakdown collision.
+Drilling a menu collapses back into a filter: `vacation/2026/=/type/pdf/` resolves
+to the same set as `vacation/2026/type=pdf/` — the **recognition route and the
+recall route reach the same place**, so nothing new is defined for "what happens
+when I finish drilling."
+
+The marker is **trailing / contextual** — it operates on the set narrowed so far,
+which is why it sits at the current position, not at a front anchor (breakdown is
+an *operation on context*, not an *origin* like `~`). At the root, `/=/`
+enumerates every dimension store-wide — the "browse facets from scratch" entry
+point, falling out for free as the same operator at depth zero rather than a
+separate namespace.
+
+Why `=` and not a sigil, a `.`-prefix, or `//`: the choice was cornered from
+three independent directions. (1) A new sigil (`@`, `#`, `:`) adds a reserved
+symbol that does nothing else, whereas `=` is already in the grammar. (2) The
+`.`-prefix (`/2026/.type/pdf`) is the tempting one — it reuses the OS hidden-file
+convention, so `ls -a` reveals the dimensions for free — but it **collides with
+archived dotfiles** (a file store cannot claim the leading-`.` namespace; people
+archive `.bashrc`), and it **forks the notation** (`.type` browse vs. `type=`
+filter become two idioms). (3) Any *prefix* marker forks browse-vs-filter the same
+way; **infix `=` is the only form that unifies them** — `type=` enumerates,
+`type=pdf` filters, one atom, blank-vs-filled. (`type//pdf` is a non-starter for a
+structural reason: POSIX path resolution collapses consecutive slashes, so a FUSE
+filesystem never even sees the empty component.) The cost paid is that `=` must be
+**reserved in names** (rejected with a message at `add`/`rename`) — a rare
+restriction, unlike a leading `.` which is common.
+
+POSIX-clean and tooling-free: `=`, `type=`, `=5+` are legal path components, and
+the `=` verbs behave like `.`/`..` — always navigable, suppressed from plain `ls`.
+**Tab-completion just mirrors `ls`** (it offers documents; the `=` verbs stay
+hidden like dotfiles, still completable once you type `=`), so no special
+completion rule is needed. Discoverability lives in the GUI and `--help`; an
+optional in-mount hook is a single hidden gateway entry **`.=`** (legal, and
+collision-proof *because* `=` is reserved in names) that `ls -a` reveals — the
+"what's that?" → `cd .=` → the dimension menu. Optional, refinable.
+
+**Appearance rule** (governs both modes): a value- or dimension-folder is offered
+**iff it actually splits the current set** (>1 distinct value) — monotonic, no
+magic thresholds, and facet-folders stay visually distinct from document leaves.
+Inside a `collection` this whole apparatus recurs on the membership set, for free,
+by the composite-boundary rule below.
+
+**The composite boundary.** A directory in this mount is one of two things — a
+**query dir** (synthetic; *is* a narrowing query) or a **composite rendered as a
+dir** (a document whose head version is a manifest, §5). A composite is **just a
+document**: it surfaces by its computed recognition name alongside plain docs
+(`Italy Trip/` beside `passport.pdf`), with the same disambiguation on name
+collisions — *no* special "directory name", *no* path assigned to it. The only
+divergence is at the leaf: `getattr` reports a directory and `readdir` lists its
+members, instead of `read` returning bytes.
+
+Descending into a composite crosses a mode boundary (above it a segment is a query
+facet; at-and-below it, the document's own internal structure). Whether that's
+*perceptible* splits cleanly by kind, and the split tracks a real difference in
+the thing:
+
+- **`collection` → imperceptible.** Members are documents with full facets in the
+  index, so "the query layer scoped to these members" is *literal*
+  (`… WHERE doc_id IN members(C) AND type=pdf`). Narrowing, recognition names,
+  globs, commutativity — all keep working. You change *universe*, not gestures.
+- **raw-import `tree` → an honest, legible hiccup.** A tree built by importing a
+  directory/website is `name → blob`; its entries *were never documents* and have
+  no facets. So query-narrowing stops at that boundary — but there is nothing to
+  lose, and the lost affordance (filter a website's file tree by tag) is one you'd
+  never reach for. The hiccup coincides with the thing genuinely being a sealed
+  artifact, so it reads as correct rather than broken. Browse it by its stored
+  names.
+- **a snapshot of a `collection` keeps its facets — for free.** Freezing a
+  collection yields a **pinned collection** (entries still point at doc-ids, each
+  pinned to a version-hash), *not* a blob-tree — so document linkage survives.
+  Its facets *as of the freeze instant* are obtained by **folding each member's
+  log up to the freeze timestamp** (the log is already a time machine): queryable
+  as-it-was, with **nothing redundant stored**. The worry "a frozen tree loses
+  its facets" therefore does not arise — the only facetless trees are raw-import
+  trees, where facetlessness is the truth.
+
+**Transfer / packaging** (banked as its own deferred slice; layout will want the
+C0 manifest encoding, §3). Two export artifacts at different fidelity points,
+chosen by intent:
+
+- **log-bundle** — ship the **logs + reachable blobs**; the receiver dedups on
+  arrival (CID match → skip) and reindexes. Documents arrive **whole**: identity,
+  version history, tags-as-claims, mergeability. Facets ride along because the
+  *logs* do (nothing copied — they fold on the far side). This is the
+  *stays-in-the-ecosystem* transfer ("git push/pull"): the `export`/`import`
+  porcelain of the verb catalog.
+- **severed blob-tree** — ship **blobs + manifest + a copied facet snapshot**:
+  frozen, anonymous, self-contained, transfs-*optional*. The receiver needs
+  neither the document graph nor transfs to use it. This is the easy
+  *package-files-for-transfer* / archive-offline artifact; the cost is the
+  severance (no identity, history, or merge).
+
+This sharpens the spine into a stateable rule: **copy facets ⟺ severed from the
+graph.** Inside the live graph, *fold, never copy* (including fold-to-timestamp
+for snapshots). The one sanctioned place to store derived facet state is the
+moment an artifact is cut loose — because that is precisely the moment it stops
+being derivable.
+
+**Open knots (this design pass is not finished):**
+
+1. **Boolean NOT** — descend=AND is free. **OR is decided *out* of the grammar:**
+   a path is one place built by *monotonic narrowing*, and OR broadens — so union
+   is the *caller's* job (shell multi-arg `ls A B`, GUI multi-select), which is the
+   universal filesystem idiom and matches faceted search (multi-select within a
+   facet = OR, across facets = AND — exactly what the two modes already produce).
+   Intra-facet OR sugar (`type=pdf,doc`) is *parked together with range selection*
+   (`size=100+`) for a future notation revisit — same shape (one facet, multiple/
+   extended values). **NOT is deferred but has the stronger case** — it has no free
+   caller-side equivalent (no `ls everything-except`), so it genuinely needs
+   in-grammar support; the open question is *scoping* (does `/a/not=b/` mean
+   "a AND not b"? does negation bind the segment or the rest of the path?).
+2. **Version addressing** — a version's durable handle is its content hash;
+   ordinals (`v1`,`v2`) are *not* merge-stable (fold-order assigned). Lean: a
+   `@version` suffix (`/doc=abc@<hash>`, `@head`, `@head~1`) to keep doc=file
+   rather than doc-as-dir-of-versions.
+3. **Listing scale** — bucketing never bounds a set; two independent needs:
+   *(a)* don't choke producing a listing (stream via crystalfuse's `DirFiller` +
+   paged index queries; never materialize the whole set), *(b)* don't force the
+   user to face a huge listing (the query model lets them narrow first). Both
+   required.
+
+*(Settled in this pass: the path grammar, results-vs-breakdown navigation with
+the `=` enumerate marker, the composite boundary, and the two transfer artifacts —
+all above.)*
 
 ### CLI = the API
 
