@@ -374,11 +374,12 @@ tag-path) — that is **recall**. Survivors (Gmail, Apple Photos, git) trade on
 
 ### Two innovations
 
-**1. The query is the handle.** A mount path `/finance/2026/report.pdf` *is* a
+**1. The query is the handle.** A mount path `/finance/year/2026/report.pdf` *is* a
 conjunctive query (each segment narrows; see "The query-path mount" below for the
-grammar); the CLI speaks the same language: `transfs checkout finance 2026 report`
-narrows by query (one match → act; several → a recognition list; zero → say so).
-A git-style short-id prefix remains as a power/script escape hatch.
+grammar — `finance` a tag, `year/2026` a walk into the year key); the CLI speaks
+the same language: `transfs checkout finance 2026 report` narrows by query (one
+match → act; several → a recognition list; zero → say so). A git-style short-id
+prefix remains as a power/script escape hatch.
 
 **2. A document's displayed name is the shortest description that
 distinguishes it in context — computed, not assigned.** Like "the John in
@@ -445,106 +446,102 @@ named `report.md` can't coexist in a folder but can in the store). So:
 ### The query-path mount
 
 This is the concrete realization of Innovation 1 (the *navigable* handle layer,
-§4). **Status: the grammar, the composite boundary, and the transfer artifacts
-below are settled (2026-06-16); recognition-navigation, boolean OR/NOT, version
-addressing, and listing-scale are still open — see "Open knots" at the end.**
-The current `/<mime-type>/<name>` mount is a deliberate stopgap this replaces.
+§4). **Status: the navigation model below is settled (2026-06-18) — the two-view
+toggle, the hierarchical tag-tree walk with value-activation, facet enumeration,
+and the wildcard; version addressing and the export/transfer format remain open
+(see "Open knots").** The current `/<mime-type>/<name>` mount is a stopgap this
+replaces. *Implementation note:* the shipped first slice (`src/fusefs.cr`,
+`src/query.cr`, `Index#match`) implements **doc-view flat filtering only** (bare
+values + `key=value`, friendly type via `LIKE`); the facet view, the hierarchical
+tag-tree, value-activation, and the `=` toggle described here are the **next
+slice**, not yet built.
 
-**The path *is* the query.** Each `/`-separated segment narrows the set;
-descending = **AND**; segments **commute** (`/vacation/1920/` and
-`/1920/vacation/` are the same set). The grammar deliberately bottoms out at
-*bare values*, because navigation should be recognition (type what you remember),
-not recall (type the schema-correct form).
+**The path *is* the query, and tags are a hierarchy.** Each `/`-separated segment
+narrows the set; descending = **AND**; segments **commute**. Tags form a *tree*: a
+`key=value` tag is a parent→child edge (`year` → `1920`), a boolean tag is a
+top-level leaf (`vacation`), and natural hierarchies nest freely —
+`date/1920/08/10`, and **MIME types fall out for free** (`type/image/jpeg`, with
+`/type/image/` = all images, retiring the `LIKE` hack). Navigation is a **walk
+down this tree.**
 
-| segment form | meaning | examples |
+| segment | meaning | example |
 |---|---|---|
-| `value` | bare, **exact**, matched against the **value space across all facets** (a boolean tag's key *is* its value, so `vacation` matches `vacation=true`) | `vacation` `1920` `pdf` |
-| `*pat*` `?` | glob over the same value space (fnmatch) | `*report*` `202?` |
-| `key=value` | exact, **pinned** to one facet | `year=1920` `type=pdf` |
-| `key=*pat*` | glob, pinned facet (the value's glob-ness flips the segment to pattern; `=` still only *pins*) | `name=*report*` |
-| `key=value+` / `key=value-` | **deferred** — range bound ≥ / ≤ on a numeric facet; a range is the AND of two bounds (`/size=100+/size=500-/`) | — |
+| `key` (a top-level node) | a boolean tag, **or** a key whose values then *activate* | `vacation` `year` `type` |
+| `key/value` (≡ `key=value`) | walk a key and pick a child → **exactly** `key=value` | `year/1920` `date/1920/08/10` |
+| lone `=` | the **view toggle** (documents ↔ facets) | `/=/` |
+| `*` | wildcard — **any key**, one level | `/=/*/1920/` |
 
-Why these choices:
+- **Value-activation makes pairing exact.** Entering `year` activates its children
+  as the valid next steps, so `/year/1920/` reads as `year`=`1920` *by position* —
+  not the looser "1920 somewhere." No footgun.
+- **`=` is a cosmetic alias for `/`.** `year=1920` ≡ `year/1920` (and `=` is the
+  tag-*creation* spelling on the CLI); a **lone** `=` can't be a separator, which
+  is exactly why it's free to be the **view toggle**. So: lone `=` = toggle,
+  `key=value` = a walk, `key=` (empty value) = **illegal** — `=` never means two
+  things in one position (the dual-hat, finally dead). Because both `/` and `=`
+  are separators, a tag key/value contains *neither* literally — a small,
+  consistent reservation, like `/` in a filename.
+- **No bare top-level values.** You reach a value through its key (`/year/1920/`),
+  never bare (`/1920/`) — safer and unambiguous (a bare top segment is always a
+  *top-level node*, never a free value). The explicit "value under any key" is the
+  wildcard `/=/*/1920/`.
+- **Direct access** is the same walk on identity facets: `doc/<id-or-prefix>` /
+  `blob/<hash>`. A discriminator is needed because a document id and a blob hash
+  are *both* 64-hex SHA-256.
 
-- **One separator, `=`.** It is the *same string you used to create a kv-tag*
-  (`tag … -- stars=4` ⇒ navigate `/stars=4/`): input and query spelling are
-  identical, zero translation. A `:` facet separator was considered and dropped —
-  unneeded once `=` carries facet-pinning, and it would have cost the `<`/`>`
-  characters we'd want for ranges.
-- **`+`/`-` for range bounds, never `<`/`>`.** Unquoted in a shell, `>` is
-  *redirection* — `ls /mnt/size>100KB` silently creates a file named `100KB`
-  rather than erroring. `+`/`-` are shell-safe. Bounds are deferred from the first
-  cut, but when added they take this shell-safe form and compose via AND for
-  ranges (no `±` glyph — composing two bounds reuses the AND rule we already have).
-- **Globs need quoting to reach us** (`ls '/mnt/*report*'`), exactly as
-  `find -name '*.txt'` does — the shell otherwise expands `*`/`?` against the live
-  listing first. `*` and `?` are the advertised surface; `[...]`/`{a,b}` work
-  quietly (suppressing them would be pointless effort). Suffixing `+`/`-` is an
-  operator **only on numeric/ordered facets** (an index-side determination); on a
-  string facet a trailing `+`/`-` is a literal character (so a tag `c++` survives).
-- **Direct access falls out of the same grammar** as the identity facets
-  `doc=<id-or-prefix>` / `blob=<hash>`. A discriminator is required because a
-  document id and a blob hash are *both* 64-hex SHA-256 strings, so a bare hash is
-  ambiguous. (Exact spelling follows the `=` grammar; not separately ratified.)
+**The two views.** A path resolves to documents *or* to facets, chosen by the lone
+`=` toggle:
 
-**Results vs. breakdown (recognition-navigation).** A query dir is **two modes**,
-and the user denotes which:
+- **doc view** (default; even count of lone `=`, including zero): the matching
+  **documents**, as *files* (a composite is a *directory*, §5), **recency-windowed**
+  — every listing is the N most-recent matches, streamed/paged, never the whole set
+  materialized. The root `/` is the window over everything: your **recents** (which
+  is why root isn't a flat dump of the store).
+- **facet view** (odd count): the **facets you could narrow by**, as *directories*
+  you walk. `ls /=/` lists the **keys** present — small and bounded
+  (`type/ year/ stars/ tag/`), never a wall of values; boolean tags collapse under
+  a synthetic **`tag/`** bucket so the menu stays tiny however many bare tags
+  exist. Drilling a key shows its activated values (`ls /=/year/` → `1920/ 2020/`).
 
-- **Results (default).** `ls vacation/2026/` lists the matching **documents**,
-  nothing else — a clean wall, no facet folders cluttering it. This is the common
-  case and it stays pure.
-- **Breakdown (explicitly asked for).** The same `=` is the **enumerate** marker.
-  Read `key=value` as a two-slot atom; **an empty slot means "enumerate that
-  slot":**
-  - `type=` → the **values** of `type` present here (`pdf/ jpg/ png/`);
-  - `=` → **all keys** — the generic dimension menu (what `/=/` shows);
-  - `=value` (e.g. `=5+`) → the **keys** that take such a value ("which
-    dimensions go above 5 here") — the dual; it rides the deferred `+`/`-` range
-    syntax, so it lands when ranges do.
+The toggle is **sticky** — drill freely between toggles, and return to narrowing
+with `cd ..`, never by stacking markers, so there is **no oscillation**. Crucially
+it **separates the two populations by view**: documents and facets are *never
+co-listed*. That is what dissolves the name-collision problem wholesale — a
+document named `year` and the facet `year` live in different views, so there is no
+sigil, no dynamic disambiguation, no fence character beyond the lone `=` itself.
 
-A bare segment (`pdf`, no `=`) stays a plain **filter** — the *empty-slot* `=` is
-the entire breakdown signal, so there is no value-vs-breakdown collision.
-Drilling a menu collapses back into a filter: `vacation/2026/=/type/pdf/` resolves
-to the same set as `vacation/2026/type=pdf/` — the **recognition route and the
-recall route reach the same place**, so nothing new is defined for "what happens
-when I finish drilling."
+**Appearance rule:** a key or value is offered **iff selecting it would actually
+narrow the current set** (some-but-not-all of the current documents match) —
+monotonic, no thresholds. An unsplittable point (one document, nothing to divide)
+shows an empty facet listing. A dangling key toggled back to docs (`/=/year/=/`)
+means "has *any* `year` set." Inside a `collection` this whole apparatus recurs on
+the membership set, for free, by the composite-boundary rule below.
 
-The marker is **trailing / contextual** — it operates on the set narrowed so far,
-which is why it sits at the current position, not at a front anchor (breakdown is
-an *operation on context*, not an *origin* like `~`). At the root, `/=/`
-enumerates every dimension store-wide — the "browse facets from scratch" entry
-point, falling out for free as the same operator at depth zero rather than a
-separate namespace.
+**The wildcard, and the shell cooperating for free.** `*` = any key, one level, so
+`/=/*/1920/` is the explicit loose "value 1920 under any key." Because facet view
+lists keys as **real directory entries**, a shell's own globbing expands `*`
+against exactly the right set and keeps only expansions that exist — so
+`ls /=/*/1920/` works **unquoted**, the shell computing "any key with a 1920" for
+us. (Doc view lists *documents*, the wrong set, so `*` would need quoting there —
+but the loose match lives in facet view anyway.) We also interpret a literal `*`
+ourselves (for quoted / `nullglob` shells). The same "facets are real dirs"
+property gives **tab-completion** in facet view for free. `**` (any depth) is
+deferred.
 
-Why `=` and not a sigil, a `.`-prefix, or `//`: the choice was cornered from
-three independent directions. (1) A new sigil (`@`, `#`, `:`) adds a reserved
-symbol that does nothing else, whereas `=` is already in the grammar. (2) The
-`.`-prefix (`/2026/.type/pdf`) is the tempting one — it reuses the OS hidden-file
-convention, so `ls -a` reveals the dimensions for free — but it **collides with
-archived dotfiles** (a file store cannot claim the leading-`.` namespace; people
-archive `.bashrc`), and it **forks the notation** (`.type` browse vs. `type=`
-filter become two idioms). (3) Any *prefix* marker forks browse-vs-filter the same
-way; **infix `=` is the only form that unifies them** — `type=` enumerates,
-`type=pdf` filters, one atom, blank-vs-filled. (`type//pdf` is a non-starter for a
-structural reason: POSIX path resolution collapses consecutive slashes, so a FUSE
-filesystem never even sees the empty component.) The cost paid is that `=` must be
-**reserved in names** (rejected with a message at `add`/`rename`) — a rare
-restriction, unlike a leading `.` which is common.
-
-POSIX-clean and tooling-free: `=`, `type=`, `=5+` are legal path components, and
-the `=` verbs behave like `.`/`..` — always navigable, suppressed from plain `ls`.
-**Tab-completion just mirrors `ls`** (it offers documents; the `=` verbs stay
-hidden like dotfiles, still completable once you type `=`), so no special
-completion rule is needed. Discoverability lives in the GUI and `--help`; an
-optional in-mount hook is a single hidden gateway entry **`.=`** (legal, and
-collision-proof *because* `=` is reserved in names) that `ls -a` reveals — the
-"what's that?" → `cd .=` → the dimension menu. Optional, refinable.
-
-**Appearance rule** (governs both modes): a value- or dimension-folder is offered
-**iff it actually splits the current set** (>1 distinct value) — monotonic, no
-magic thresholds, and facet-folders stay visually distinct from document leaves.
-Inside a `collection` this whole apparatus recurs on the membership set, for free,
-by the composite-boundary rule below.
+**Why this shape** (alternatives, rejected): an *empty-slot* enumerate marker
+(`type=` lists values) brought back the dual-hat and a flat value-list that
+returned *more entries than there were documents* — useless at the root. A
+per-entry **sigil** (`@year/`) co-lists the populations, costing a reserved leading
+character and still needing collision handling. A **`.`-prefix** collides with
+archived dotfiles (a file store can't claim that namespace). **`//`** is collapsed
+by POSIX before FUSE ever sees the empty component. The **toggle-plus-walk** model
+beats them all: views separate the populations (no co-listing → no collision, no
+sigil), a lone `=` is purely the toggle (no dual-hat), the hierarchy keeps the
+facet menu small and the value-pairing exact, and the OS does the globbing and
+completion. The mount is deliberately scoped to **browse, not full query**:
+boolean OR/NOT and heavy range/predicate work live in the CLI and GUI (as Perkeep
+keeps its query in a search box and its mount as structured views) — see "Open
+knots".
 
 **The composite boundary.** A directory in this mount is one of two things — a
 **query dir** (synthetic; *is* a narrowing query) or a **composite rendered as a
@@ -619,15 +616,18 @@ being derivable.
    ordinals (`v1`,`v2`) are *not* merge-stable (fold-order assigned). Lean: a
    `@version` suffix (`/doc=abc@<hash>`, `@head`, `@head~1`) to keep doc=file
    rather than doc-as-dir-of-versions.
-3. **Listing scale** — bucketing never bounds a set; two independent needs:
-   *(a)* don't choke producing a listing (stream via crystalfuse's `DirFiller` +
-   paged index queries; never materialize the whole set), *(b)* don't force the
-   user to face a huge listing (the query model lets them narrow first). Both
-   required.
+3. **Export / transfer format** — the layout of the two artifacts above
+   (log-bundle, severed blob-tree); wants the C0 manifest encoding (§3), so it
+   waits on the canonical-hashing contract.
 
-*(Settled in this pass: the path grammar, results-vs-breakdown navigation with
-the `=` enumerate marker, the composite boundary, and the two transfer artifacts —
-all above.)*
+*(Settled across this design: the hierarchical tag-tree walk with value-activation,
+the two-view `=` toggle, facet enumeration by key (with the `tag/` bucket and the
+narrow-iff-it-splits appearance rule), the wildcard and mode-based glob behavior,
+recents/recency-windowing at the root, the composite boundary, and the two transfer
+artifacts. **Listing scale** is handled — recency-windowed doc views + bounded
+facet keys + the appearance rule. **OR** is out of the grammar (union = the
+caller's job; intra-facet OR sugar parked with range selection for a notation
+revisit). The mount is scoped to browse, not full query.)*
 
 ### CLI = the API
 
