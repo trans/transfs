@@ -557,6 +557,77 @@ boolean OR/NOT and heavy range/predicate work live in the CLI and GUI (as Perkee
 keeps its query in a search box and its mount as structured views) — see "Open
 knots".
 
+**Implementation spine — tags as paths, navigation as prefix-walk.** The walk,
+value-activation, facet enumeration, *and* arbitrary-depth hierarchy collapse into
+one mechanism: store each tag as its full hierarchical **path string** (`stars/4`,
+`vacation`, `type/image/jpeg`, `date/1920/08/10` — the `=` alias normalizes
+`stars=4` → `stars/4` at creation), and the mount is **prefix navigation over the
+set of tag-paths**. The index representation simplifies accordingly:
+`doc_tags(doc_id, key, value)` → `doc_tags(doc_id, path)`.
+
+Resolving a mount path is a **fold** over its segments carrying two pieces of state
+— the accumulated document set **S** and a partial prefix **P** (reset at tag
+boundaries):
+
+```
+for each segment X:
+  P' = P + "/" + X
+  S  = S ∩ { docs with a tag-path having prefix P' }   # path = P' OR path LIKE P'||'/%'  (index-friendly)
+  P  = (P' is itself a stored tag) ? "" : P'           # complete tag → reset (pick a co-tag next)
+```
+
+The two views are each **one query** over `(S, P)`:
+- **facet view** (enumerate) = the distinct component at depth `|P|` among S's
+  tag-paths with prefix P. P empty (you just completed a tag) → the first
+  components = the **co-facets**; P partial (`year`) → the next level = the **drill
+  values**. Same query. The **appearance rule** is a filter on it (a component
+  shows iff it *splits* S — which also auto-hides the tag you already applied:
+  everything in S has it, so it can't split).
+- **doc view** (`=`) = S as documents, recency-windowed.
+
+This is **depth-agnostic** — `year/1920`, `type/image/jpeg`, and `date/1920/08/10`
+are the same kind of object (a path) walked the same way, so arbitrary-depth
+hierarchy and MIME-as-hierarchy come *free*, not as a later increment (the
+`LIKE '%/pdf'` friendly-type hack disappears entirely).
+
+**Tag verbs — `add` and `set` (and the leaf invariant).** How tags on one document
+relate is governed by *intent*, expressed as one of two verbs — not by an automatic
+"deeper wins" rule:
+
+- **`add key/value`** = "this is true." Accumulates, but with *subsumption* along a
+  lineage — the **most-specific is kept**, order-independent: `add date/1920/10/10`
+  after `date/1920` replaces the vaguer (the year is now redundant); `add date/1920`
+  after `date/1920/10/10` is a **no-op** (1920 is already implied — nothing new
+  asserted, and the month/day are *not* discarded). Different lineages coexist
+  (`genre/jazz` + `genre/rock` → both: multi-valued, the way `animal/dog` doesn't
+  touch `color/brown`).
+- **`set key value`** = "this key IS exactly this." Replaces the whole `key/*`
+  subtree with the single path given — *coarsening allowed*: `set date 1920` after
+  `date/1920/10/10` deliberately discards the month and day. This is the
+  single-valued / latest-wins behavior for keys like `date` or `owner`.
+
+Both verbs preserve the **leaf invariant** (after either, each lineage on the
+document is a single leaf — no tag is a prefix of another *on the same doc*), which
+is what keeps the prefix-walk's complete-vs-partial boundary unambiguous. Two
+payoffs: **(1) no per-key cardinality metadata** — "`date` is single-valued" just
+means "you always `set` it"; "`genre` is multi-valued" means "you `add`"; the verb
+carries the intent and the store stays dumb about which keys are which. **(2)
+merge-safe** — model `set` as a claim that clears the `key/*` subtree then adds
+(≈ `del key/*` + `add`, atomic), so two concurrent `set date` claims resolve by
+timestamp (later wins) with no cardinality table; `add` is commutative subsumption
+and merges trivially.
+
+Across documents, granularities still coexist correctly: a year-only doc and a
+day-level doc *both* match the `date/1920` prefix (so "all of 1920" finds both),
+and at that boundary the facet view shows both the deeper drill (`08/`, from the
+day-level doc) *and* the co-facets (the year-only doc is done) — which is right.
+
+What this leaves for the build is the `getattr`/`readdir`/`lookup`/render branching
+in `fusefs.cr` (genuinely separate plumbing), plus the prefix query, the
+next-component enumeration (substr/instr over the indexed `path`), and the small
+fold above. The earlier "stateful key/value machine" and "deferred deep hierarchy"
+both dissolve into this.
+
 **The composite boundary.** A directory in this mount is one of two things — a
 **query dir** (synthetic; *is* a narrowing query) or a **composite rendered as a
 dir** (a document whose head version is a manifest, §5). A composite is **just a
