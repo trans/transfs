@@ -451,10 +451,11 @@ toggle, the hierarchical tag-tree walk with value-activation, facet enumeration,
 and the wildcard; version addressing and the export/transfer format remain open
 (see "Open knots").** The current `/<mime-type>/<name>` mount is a stopgap this
 replaces. *Implementation note:* the shipped first slice (`src/fusefs.cr`,
-`src/query.cr`, `Index#match`) implements **doc-view flat filtering only** (bare
-values + `key=value`, friendly type via `LIKE`); the facet view, the hierarchical
-tag-tree, value-activation, and the `=` toggle described here are the **next
-slice**, not yet built.
+`src/query.cr`, `Index#match`) implements **documents-as-default flat filtering**
+(bare values + `key=value`, friendly type via `LIKE`) — which this design now
+**inverts** (facets are the default; documents are rendered with `=`). So the next
+slice both adds the facet view + hierarchical tag-tree + value-activation *and*
+flips the default; the shipped flat doc-default behavior is superseded.
 
 **The path *is* the query, and tags are a hierarchy.** Each `/`-separated segment
 narrows the set; descending = **AND**; segments **commute**. Tags form a *tree*: a
@@ -469,7 +470,7 @@ down this tree.**
 | `key` (a top-level node) | a boolean tag, **or** a key whose values then *activate* | `vacation` `year` `type` |
 | `key/value` (≡ `key=value`) | walk a key and pick a child → **exactly** `key=value` | `year/1920` `date/1920/08/10` |
 | lone `=` | the **view toggle** (documents ↔ facets) | `/=/` |
-| `*` | wildcard — **any key**, one level | `/=/*/1920/` |
+| `*` | wildcard — **any key**, one level | `/*/1920/` |
 
 - **Value-activation makes pairing exact.** Entering `year` activates its children
   as the valid next steps, so `/year/1920/` reads as `year`=`1920` *by position* —
@@ -484,24 +485,37 @@ down this tree.**
 - **No bare top-level values.** You reach a value through its key (`/year/1920/`),
   never bare (`/1920/`) — safer and unambiguous (a bare top segment is always a
   *top-level node*, never a free value). The explicit "value under any key" is the
-  wildcard `/=/*/1920/`.
+  wildcard `/*/1920/`.
 - **Direct access** is the same walk on identity facets: `doc/<id-or-prefix>` /
   `blob/<hash>`. A discriminator is needed because a document id and a blob hash
   are *both* 64-hex SHA-256.
 
-**The two views.** A path resolves to documents *or* to facets, chosen by the lone
-`=` toggle:
+**The two views — facets are the default; documents are *rendered*.** A path
+resolves to facets *or* to documents, chosen by the lone `=` toggle, and **the
+default is facets** — this is what makes the mount POSIX-consistent (see below):
 
-- **doc view** (default; even count of lone `=`, including zero): the matching
-  **documents**, as *files* (a composite is a *directory*, §5), **recency-windowed**
-  — every listing is the N most-recent matches, streamed/paged, never the whole set
-  materialized. The root `/` is the window over everything: your **recents** (which
-  is why root isn't a flat dump of the store).
-- **facet view** (odd count): the **facets you could narrow by**, as *directories*
-  you walk. `ls /=/` lists the **keys** present — small and bounded
+- **facet view** (default; even count of lone `=`, including zero): the **facets
+  you could narrow by**, as *directories* you walk. The root `/` is the **facet
+  menu** — `ls /` lists the **keys** present, small and bounded
   (`type/ year/ stars/ tag/`), never a wall of values; boolean tags collapse under
   a synthetic **`tag/`** bucket so the menu stays tiny however many bare tags
-  exist. Drilling a key shows its activated values (`ls /=/year/` → `1920/ 2020/`).
+  exist. Drilling a key shows its activated values (`ls /year/` → `1920/ 2020/`).
+- **doc view** (rendered; odd count): the matching **documents**, as *files* (a
+  composite is a *directory*, §5), **recency-windowed** — the N most-recent
+  matches, streamed/paged, never the whole set. `/=/` is the window over
+  everything: your **recents**. `/year/1920/=/` is the documents for that query.
+
+**Why facets-default — the POSIX-consistency win.** The thing you `cd` into must be
+the thing `ls` shows, or `find` / tab-completion / file managers (all `readdir`-
+based) break. With facets as the *default listing*, the **navigation vocabulary is
+the listing** at every level: `cd /year/` works *because* `year/` is listed in `/`,
+and `cd /year/1920/` works because `1920/` is listed in `/year/`. Fully walkable by
+ordinary tools. (Documents-as-default would invert this — you'd type tag terms that
+*aren't* listed, a search box in a path costume, navigable-but-unlisted like
+autofs.) The trade is the *only* thing given up: documents aren't at the root —
+your recents are one render away at `/=/`. That is an ergonomic preference, not a
+structural cost, and for a tag archive "open it → see how it's organized" is
+arguably the right default anyway.
 
 The toggle is **sticky** — drill freely between toggles, and return to narrowing
 with `cd ..`, never by stacking markers, so there is **no oscillation**. Crucially
@@ -509,23 +523,23 @@ it **separates the two populations by view**: documents and facets are *never
 co-listed*. That is what dissolves the name-collision problem wholesale — a
 document named `year` and the facet `year` live in different views, so there is no
 sigil, no dynamic disambiguation, no fence character beyond the lone `=` itself.
+Net of facets-default + view-separation: **typed query-paths, collision-free, and
+fully-listed navigation all hold at once** — the inversion buys all three.
 
 **Appearance rule:** a key or value is offered **iff selecting it would actually
 narrow the current set** (some-but-not-all of the current documents match) —
 monotonic, no thresholds. An unsplittable point (one document, nothing to divide)
-shows an empty facet listing. A dangling key toggled back to docs (`/=/year/=/`)
-means "has *any* `year` set." Inside a `collection` this whole apparatus recurs on
-the membership set, for free, by the composite-boundary rule below.
+shows an empty facet listing. Rendering a dangling key (`/year/=/`) means "the
+documents that have *any* `year` set." Inside a `collection` this whole apparatus
+recurs on the membership set, for free, by the composite-boundary rule below.
 
 **The wildcard, and the shell cooperating for free.** `*` = any key, one level, so
-`/=/*/1920/` is the explicit loose "value 1920 under any key." Because facet view
-lists keys as **real directory entries**, a shell's own globbing expands `*`
-against exactly the right set and keeps only expansions that exist — so
-`ls /=/*/1920/` works **unquoted**, the shell computing "any key with a 1920" for
-us. (Doc view lists *documents*, the wrong set, so `*` would need quoting there —
-but the loose match lives in facet view anyway.) We also interpret a literal `*`
-ourselves (for quoted / `nullglob` shells). The same "facets are real dirs"
-property gives **tab-completion** in facet view for free. `**` (any depth) is
+`/*/1920/` is the explicit loose "value 1920 under any key." Because facet view is
+the *default* and lists keys as **real directory entries**, a shell's own globbing
+expands `*` against exactly the right set and keeps only expansions that exist — so
+`ls /*/1920/` works **unquoted**, the shell computing "any key with a 1920" for us
+(and you get **tab-completion** the same way, for free). We also interpret a
+literal `*` ourselves (for quoted / `nullglob` shells). `**` (any depth) is
 deferred.
 
 **Why this shape** (alternatives, rejected): an *empty-slot* enumerate marker
