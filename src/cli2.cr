@@ -135,7 +135,9 @@ module TransFS
     end
 
     private def cmd_mount(r)
-      mp = str(r, "mountpoint")
+      # Absolute mountpoint: libfuse changes the process's cwd once it starts
+      # serving, so a relative path would resolve against the wrong directory.
+      mp = File.expand_path(str(r, "mountpoint"))
       abort("mountpoint does not exist: #{mp}") unless Dir.exists?(mp)
       # `-o ro` makes the kernel itself reject writes with EROFS (the honest
       # "read-only filesystem" signal) before they reach us — the structural
@@ -193,6 +195,9 @@ if args.first? == "--store"
   args.shift
   root = args.shift? || abort("--store needs a directory")
 end
+# Absolute store path: the mount's libfuse loop changes cwd while serving, so a
+# relative `--store` would break the lazily-opened index and blob reads.
+root = File.expand_path(root)
 
 cli = TransFS::CLI2.build_cli
 result = cli.run(args)
