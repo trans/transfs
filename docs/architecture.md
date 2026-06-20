@@ -59,7 +59,7 @@ It is exposed to the OS through a FUSE mount (via the sibling project
 <root>/
   blobs/<hh>/<hex-sha256>             content blobs — PURE CAS, hash only
   .transfs/docs/<hh>/<hex-id>.log     one append-only claim log per document
-  files.db                            the rebuildable SQLite index (disposable)
+  .transfs/index.db                   the rebuildable SQLite index (disposable)
 ```
 
 **All on-disk names are the lowercase hex encoding** of the underlying 32-byte
@@ -296,8 +296,8 @@ collision-neighborhood lookup (see §7) are instant.
 > debuggable with the `sqlite3` CLI, no hex↔bytes conversion at boundaries, and
 > the rest of the codebase already speaks hex; 32 bytes/row is irrelevant for a
 > personal archive's metadata. (2) the index lives at
-> **`<root>/.transfs/index.db`**, not `<root>/files.db` — the legacy SQL model
-> still owns `files.db` during the transition. Opening a missing index rebuilds
+> **`<root>/.transfs/index.db`** (the DDL sketch below wrote `files.db`).
+> Opening a missing index rebuilds
 > it from the logs; every mutating op writes its document's rows through, so the
 > index stays fresh across separate CLI processes. `type`/`size` are derived on
 > fold (size from the blob; type currently from the name's extension — real
@@ -755,11 +755,12 @@ Verb catalog (the operational API):
 
 Here `<q>` is a query/recognition handle, never a raw id.
 
-**As built (interim `transfs2` CLI).** Subcommands are Jargon schemas, one YAML
-file per command under `schemas/`, embedded at compile time via `read_file` so
-the binary is self-contained; each carries `x-ui` render hints for the future
+**As built (`transfs` CLI, `src/cli.cr`).** Subcommands are Jargon schemas, one
+YAML file per command under `schemas/`, embedded at compile time via `read_file`
+so the binary is self-contained; each carries `x-ui` render hints for the future
 GUI. Implemented so far: `add`, `addversion`, `rename`, `tag`/`untag`, `list`,
-`find <tag:|type:|name:|bare>`, `cat`, `show`, `versions`, `reindex`. Requires
+`find <tag:|type:|name:|bare>`, `cat`, `show`, `versions`, `reindex`, `mount`.
+Requires
 **Jargon ≥ 0.19** (its `--` literal-positional support, added in response to a
 transfs requirement, lets `key=value` and leading-dash tag values pass as
 positionals: `tag <id> -- stars=4`). Tag add/remove are **separate commands**

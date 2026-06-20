@@ -15,10 +15,10 @@ set -euo pipefail
 # --- locate the repo + binary (build if needed) ---
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
-bin="bin/transfs2"
+bin="bin/transfs"
 if [[ ! -x "$bin" ]]; then
   echo "building $bin ..."
-  crystal build src/cli2.cr -o "$bin"
+  crystal build src/cli.cr -o "$bin"
 fi
 
 store="${1:-demo/store}"

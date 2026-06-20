@@ -6,9 +6,7 @@ require "./index"
 
 module TransFS
   # The claim-log core: the operations that the CLI (and later the GUI, and the
-  # mount) all go through. This is the new model (docs/architecture.md); it lives
-  # alongside the legacy SQL model (store.cr/tagfs.cr) until the new path is
-  # proven and the old one retired.
+  # mount) all go through — the model described in docs/architecture.md.
   class Library
     getter root : String
     @index : Index?

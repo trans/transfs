@@ -16,8 +16,8 @@ module TransFS
   #     sqlite3 CLI, no hex<->bytes conversion at every boundary, and the whole
   #     codebase already speaks hex. 32 bytes/row is irrelevant for a personal
   #     archive's metadata.
-  #   * the db lives at `<root>/.transfs/index.db`, not `<root>/files.db` — the
-  #     legacy SQL model still owns files.db during the transition.
+  #   * the db lives at `<root>/.transfs/index.db` (the §6 DDL sketch wrote
+  #     `<root>/files.db`).
   class Index
     @db : DB::Database
     @cas : CAS
