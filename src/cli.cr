@@ -203,4 +203,12 @@ unless result.valid?
   STDERR.puts result.errors.join("\n")
   exit 1
 end
-TransFS::CLI.new(root).dispatch(result)
+
+begin
+  TransFS::CLI.new(root).dispatch(result)
+rescue ex : IO::Error
+  # A closed downstream pipe (e.g. `transfs list | head`) makes a write raise
+  # "Broken pipe". Exit quietly like a normal Unix filter rather than dumping a
+  # stack trace; re-raise anything that isn't a broken pipe.
+  raise ex unless ex.os_error == Errno::EPIPE
+end
