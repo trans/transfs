@@ -44,9 +44,6 @@ module TransFS
   # Read-only and honest about it: the mount is taken with `-o ro`, so the kernel
   # itself returns EROFS on writes (mutation is via the CLI).
   class FuseSystem < Fuse::FileSystem
-    # Recency window: a doc view lists at most this many most-recent matches.
-    RECENT_LIMIT = 200
-
     def initialize(@lib : Library)
       super()
     end
@@ -84,7 +81,7 @@ module TransFS
 
     # The document leaf named `name` in the doc view of `walk`, or nil.
     private def leaf_row(walk : Index::Walk, name : String) : Index::Row2?
-      leaves(@lib.index.docs(walk, RECENT_LIMIT))
+      leaves(@lib.index.docs(walk))
         .find { |(n, _)| n == name }.try { |(_, row)| row }
     end
 
@@ -112,7 +109,7 @@ module TransFS
       return -Errno::ENOENT.value if parsed.doc_name # a file, not a directory
       entries =
         if parsed.doc_view
-          leaves(@lib.index.docs(walk, RECENT_LIMIT)).map { |(n, _)| n }
+          leaves(@lib.index.docs(walk)).map { |(n, _)| n }
         else
           @lib.index.facets(walk)
         end

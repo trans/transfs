@@ -271,12 +271,19 @@ module TransFS
       Walk.new(constraints, partial, valid)
     end
 
-    # The documents matching a walk (S), recency-windowed. Empty walk => recents.
-    def docs(walk : Walk, limit : Int32) : Array(Row2)
+    # The documents matching a walk (S), newest first. Empty walk => all docs.
+    # `limit` is optional and currently unused by the mount (no paging yet — it
+    # lists everything); kept for when DirFiller-based paging lands (§7 scale).
+    def docs(walk : Walk, limit : Int32? = nil) : Array(Row2)
       where, args = where_for(walk)
-      sql = "SELECT d.id, d.name, d.type, d.size, d.version_count, d.date_added, " \
-            "d.head_hash FROM documents d#{where} ORDER BY d.date_added DESC LIMIT ?"
-      args << limit.to_i64
+      sql = String.build do |s|
+        s << "SELECT d.id, d.name, d.type, d.size, d.version_count, d.date_added, " \
+             "d.head_hash FROM documents d" << where << " ORDER BY d.date_added DESC"
+        if limit
+          s << " LIMIT ?"
+          args << limit.to_i64
+        end
+      end
       query_rows2(sql, args)
     end
 
