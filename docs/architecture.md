@@ -450,12 +450,15 @@ This is the concrete realization of Innovation 1 (the *navigable* handle layer,
 toggle, the hierarchical tag-tree walk with value-activation, facet enumeration,
 and the wildcard; version addressing and the export/transfer format remain open
 (see "Open knots").** The current `/<mime-type>/<name>` mount is a stopgap this
-replaces. *Implementation note:* the shipped first slice (`src/fusefs.cr`,
-`src/query.cr`, `Index#match`) implements **documents-as-default flat filtering**
-(bare values + `key=value`, friendly type via `LIKE`) — which this design now
-**inverts** (facets are the default; documents are rendered with `=`). So the next
-slice both adds the facet view + hierarchical tag-tree + value-activation *and*
-flips the default; the shipped flat doc-default behavior is superseded.
+replaces. *Implementation note:* the facets-default model below is **built**
+(`src/index.cr` tags-as-paths + `walk`/`docs`/`facets`, `src/query.cr` parser,
+`src/fusefs.cr` resolver): `ls /` is the facet menu, hierarchical walk
+(`/year/1920/`, `/type/image/`), `=` renders documents (`/=/` recents,
+`/year/1920/=/` filtered), shell-glob `*` cooperates against the listed keys.
+Still deferred: supersession (`add`/`set` verbs — a truth-layer change),
+composites as dir-rendered manifests, computed recognition names (the `~id`
+disambiguation stands in), and literal `*` interpretation (the shell covers the
+common case).
 
 **The path *is* the query, and tags are a hierarchy.** Each `/`-separated segment
 narrows the set; descending = **AND**; segments **commute**. Tags form a *tree*: a

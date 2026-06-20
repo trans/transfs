@@ -150,28 +150,28 @@ module TransFS
   end
 
   describe Query do
-    it "parses bare and key=value segments; root is empty" do
-      Query.parse("/").should be_empty
-      Query.parse("/vacation").should eq [Predicate.new(nil, "vacation")]
-      Query.parse("/type=pdf").should eq [Predicate.new("type", "pdf")]
+    it "parses facet-walk components; root is empty; lone = toggles to doc view" do
+      Query.parse("/").components.should be_empty
+      Query.parse("/").doc_view.should be_false
+      Query.parse("/year/1920").components.should eq ["year", "1920"]
+      Query.parse("/=/").doc_view.should be_true
     end
 
-    it "drops empty segments (leading/trailing/double slash)" do
-      Query.parse("//a///b/").map(&.value).should eq ["a", "b"]
+    it "normalizes the = alias to / and splits into components" do
+      Query.parse("/stars=4/").components.should eq ["stars", "4"]
+      Query.parse("/date=1920/08/10/").components.should eq ["date", "1920", "08", "10"]
     end
 
-    it "treats descending segments as commutative" do
-      Query.parse("/a/b").sort_by(&.value).should eq Query.parse("/b/a").sort_by(&.value)
+    it "drops empty segments and counts = parity for the view" do
+      Query.parse("//a///b/").components.should eq ["a", "b"]
+      Query.parse("/=/=/").doc_view.should be_false # two toggles -> back to facets
     end
 
-    it "splits on the first '=' and keeps later ones in the value" do
-      Query.segment("stars=4").should eq Predicate.new("stars", "4")
-      Query.segment("k=a=b").should eq Predicate.new("k", "a=b")
-    end
-
-    it "treats no-'=' and a leading '=' (deferred breakdown) as a bare value" do
-      Query.segment("c++").should eq Predicate.new(nil, "c++")
-      Query.segment("=x").should eq Predicate.new(nil, "=x")
+    it "captures the trailing document name in doc view" do
+      p = Query.parse("/year/1920/=/report.pdf")
+      p.components.should eq ["year", "1920"]
+      p.doc_view.should be_true
+      p.doc_name.should eq "report.pdf"
     end
   end
 
@@ -184,16 +184,17 @@ module TransFS
       end
     end
 
-    it "splits key=value tags into (key, value) and keeps booleans null" do
+    it "stores tags as hierarchical paths (= aliases /, booleans bucket under tag/)" do
       with_store do |fs, root|
         with_file("x") do |f|
           doc = fs.add(f)
           fs.tag(doc, add: ["finance", "stars=4"])
           idx = Index.new(root)
-          # boolean tag: queryable by key
-          idx.by_tag("finance").map(&.id).should eq [doc.id]
-          # key=value tag: rendered back as stars=4 in the row's tag list
-          idx.by_tag("stars").first.tags.should contain "stars=4"
+          idx.by_tag("finance").map(&.id).should eq [doc.id] # boolean, under tag/
+          idx.by_tag("stars").map(&.id).should eq [doc.id]
+          tags = idx.all.find { |r| r.id == doc.id }.not_nil!.tags
+          tags.should contain "tag/finance" # boolean -> tag/ bucket
+          tags.should contain "stars/4"     # = aliases /
         end
       end
     end
@@ -233,45 +234,58 @@ module TransFS
       end
     end
 
-    describe "#match" do
-      it "filters by bare values, key=value, and their AND" do
+    describe "prefix-walk navigation (#walk / #docs / #facets)" do
+      # seed: a.pdf {vacation, year=1920}; b.jpg {vacation}; c.txt {year=2020, stars=4}
+      it "walks components into constraints + partial with exact value pairing" do
+        with_store do |fs|
+          a = ""
+          with_file("pdf") { |f| d = fs.add(f, "a.pdf"); fs.tag(d, add: ["vacation", "year=1920"]); a = d.id }
+          with_file("jpg") { |f| fs.add(f, "b.jpg") } # makes type/image a real prefix
+          with_file("txt") { |f| d = fs.add(f, "c.txt"); fs.tag(d, add: ["year=2020", "stars=4"]) }
+          idx = fs.index
+
+          # year/1920 is one tag: the partial holds it; /year/1920/ == year=1920
+          w = idx.walk(["year", "1920"])
+          w.valid.should be_true
+          idx.docs(w, 100).map(&.id).should eq [a]
+
+          # two tags: year/1920 completes (a constraint), type/image is the partial
+          w2 = idx.walk(["year", "1920", "type", "image"])
+          w2.constraints.should eq ["year/1920"]
+          w2.partial.should eq "type/image"
+          idx.docs(w2, 100).should be_empty # a.pdf is not an image
+
+          idx.walk(["nope"]).valid.should be_false # unknown component
+        end
+      end
+
+      it "renders docs recency-windowed; empty walk = all docs (recents)" do
         with_store do |fs|
           a = b = c = ""
           with_file("pdf") { |f| d = fs.add(f, "a.pdf"); fs.tag(d, add: ["vacation", "year=1920"]); a = d.id }
           with_file("jpg") { |f| d = fs.add(f, "b.jpg"); fs.tag(d, add: ["vacation"]); b = d.id }
           with_file("txt") { |f| d = fs.add(f, "c.txt"); fs.tag(d, add: ["year=2020", "stars=4"]); c = d.id }
           idx = fs.index
-          ids = ->(preds : Array(Predicate)) { idx.match(preds).map(&.id).sort }
 
-          # bare value -> a boolean tag key
-          ids.call([Predicate.new(nil, "vacation")]).should eq [a, b].sort
-          # bare value -> a tag value
-          ids.call([Predicate.new(nil, "1920")]).should eq [a]
-          # bare value -> friendly type (subtype, then major)
-          ids.call([Predicate.new(nil, "pdf")]).should eq [a]
-          ids.call([Predicate.new(nil, "image")]).should eq [b]
-          # key=value tag
-          ids.call([Predicate.new("year", "1920")]).should eq [a]
-          ids.call([Predicate.new("stars", "4")]).should eq [c]
-          # structural key=value (name, friendly type)
-          ids.call([Predicate.new("name", "a.pdf")]).should eq [a]
-          ids.call([Predicate.new("type", "pdf")]).should eq [a]
-          # AND across predicates, and its commutativity
-          ids.call([Predicate.new(nil, "vacation"), Predicate.new("year", "1920")]).should eq [a]
-          ids.call([Predicate.new("year", "1920"), Predicate.new(nil, "vacation")]).should eq [a]
-          # empty -> all documents; no match -> empty
-          ids.call([] of Predicate).should eq [a, b, c].sort
-          ids.call([Predicate.new("year", "9999")]).should be_empty
+          idx.docs(idx.walk([] of String), 100).map(&.id).sort.should eq [a, b, c].sort
+          idx.docs(idx.walk(["tag", "vacation"]), 100).map(&.id).sort.should eq [a, b].sort
+          idx.docs(idx.walk([] of String), 100).first.head_hash.should_not be_nil
         end
       end
 
-      it "carries head_hash so a leaf can be served index-only" do
+      it "enumerates splitting facet keys, then values, with the tag/ bucket" do
         with_store do |fs|
-          with_file("body") do |f|
-            doc = fs.add(f, "a.pdf")
-            row = fs.index.match([Predicate.new("name", "a.pdf")]).first
-            row.head_hash.should eq doc.head
-          end
+          with_file("pdf") { |f| d = fs.add(f, "a.pdf"); fs.tag(d, add: ["vacation", "year=1920"]) }
+          with_file("jpg") { |f| d = fs.add(f, "b.jpg"); fs.tag(d, add: ["vacation"]) }
+          with_file("txt") { |f| d = fs.add(f, "c.txt"); fs.tag(d, add: ["year=2020", "stars=4"]) }
+          idx = fs.index
+
+          top = idx.facets(idx.walk([] of String))
+          ["type", "year", "stars", "tag"].each { |k| top.should contain k }
+          top.should_not contain "owner" # all docs owner/local -> doesn't split, hidden
+
+          idx.facets(idx.walk(["year"])).should eq ["1920", "2020"]
+          idx.facets(idx.walk(["tag"])).should eq ["vacation"]
         end
       end
     end

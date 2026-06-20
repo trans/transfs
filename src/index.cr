@@ -1,9 +1,9 @@
 require "db"
 require "sqlite3"
 require "mime"
+require "set"
 require "./cas"
 require "./document"
-require "./query"
 
 module TransFS
   # The SQLite index: a *materialized facet view* folded from the claim logs
@@ -67,12 +67,15 @@ module TransFS
           PRIMARY KEY (doc_id, seq)
         )
       SQL
+      # Tags are stored as full hierarchical PATH strings (docs/architecture.md §7
+      # "tags as paths"): a kv-tag `stars=4` is `stars/4`, a boolean tag is bucketed
+      # under `tag/` (`tag/vacation`), and derived facets ride here too
+      # (`type/image/jpeg`, `owner/local`). The mount is a prefix-walk over these.
       @db.exec <<-SQL
         CREATE TABLE IF NOT EXISTS doc_tags (
           doc_id TEXT NOT NULL,
-          key    TEXT NOT NULL,
-          value  TEXT,
-          PRIMARY KEY (doc_id, key, value)
+          path   TEXT NOT NULL,
+          PRIMARY KEY (doc_id, path)
         )
       SQL
       # membership: created for schema completeness; populated once composites
@@ -93,7 +96,7 @@ module TransFS
         )
       SQL
       @db.exec "CREATE INDEX IF NOT EXISTS idx_documents_name_type ON documents(name, type)"
-      @db.exec "CREATE INDEX IF NOT EXISTS idx_doc_tags_key_value ON doc_tags(key, value)"
+      @db.exec "CREATE INDEX IF NOT EXISTS idx_doc_tags_path ON doc_tags(path)"
       @db.exec "CREATE INDEX IF NOT EXISTS idx_versions_hash ON versions(hash)"
     end
 
@@ -143,11 +146,27 @@ module TransFS
         )
       end
 
-      doc.tags.each do |t|
-        key, value = split_tag(t)
-        @db.exec("INSERT OR IGNORE INTO doc_tags (doc_id, key, value) VALUES (?, ?, ?)",
-          doc.id, key, value)
+      facet_paths(doc).each do |p|
+        @db.exec("INSERT OR IGNORE INTO doc_tags (doc_id, path) VALUES (?, ?)", doc.id, p)
       end
+    end
+
+    # All of a document's facets as hierarchical path strings (§7). User tags are
+    # normalized (`=` is an alias for `/`); a single-component tag is a boolean and
+    # is bucketed under `tag/`; derived facets (type, owner) ride here too so the
+    # prefix-walk is uniform over user + derived facets.
+    private def facet_paths(doc : Document) : Array(String)
+      paths = [] of String
+      if t = type_for(doc.name) # e.g. "image/jpeg" -> "type/image/jpeg"
+        paths << "type/#{t}"
+      end
+      paths << "owner/local" # owner column default until ownership lands
+      doc.tags.each do |tag|
+        p = tag.gsub('=', '/')                 # `=` aliases `/`
+        p = "tag/#{p}" unless p.includes?('/') # a boolean tag -> the `tag/` bucket
+        paths << p
+      end
+      paths.uniq
     end
 
     private def delete_rows(id : String) : Nil
@@ -170,21 +189,26 @@ module TransFS
       version_count : Int32, date_added : String, head_hash : String?,
       tags : Array(String)
 
-    # Facet keys that are columns on `documents` rather than tags. A `key=value`
-    # predicate whose key is here matches the column; otherwise it's a tag.
-    # (Allowlist — only these names are ever interpolated into SQL.)
-    STRUCTURAL = {"type", "name", "owner"}
+    # The parsed tag-structure of a mount path (§7 prefix-walk): a list of
+    # completed tag-paths (each an AND constraint) plus the trailing `partial`
+    # prefix (the current drill anchor). `valid` is false if a segment named no
+    # real tag-prefix (an unknown path component).
+    record Walk, constraints : Array(String), partial : String, valid : Bool
 
     def all : Array(Row)
       query_rows("SELECT id, name, type, size, version_count, date_added " \
                  "FROM documents ORDER BY date_added")
     end
 
+    # CLI `find tag:<key>` — docs having `key` as any component of a tag-path.
     def by_tag(key : String) : Array(Row)
+      k = escape_like(key)
       query_rows(
         "SELECT d.id, d.name, d.type, d.size, d.version_count, d.date_added " \
-        "FROM documents d JOIN doc_tags t ON t.doc_id = d.id " \
-        "WHERE t.key = ? ORDER BY d.date_added", key)
+        "FROM documents d WHERE EXISTS (SELECT 1 FROM doc_tags t WHERE t.doc_id = d.id " \
+        "AND (t.path = ? OR t.path LIKE ? ESCAPE '\\' OR t.path LIKE ? ESCAPE '\\' " \
+        "OR t.path LIKE ? ESCAPE '\\')) ORDER BY d.date_added",
+        key, "#{k}/%", "%/#{k}", "%/#{k}/%")
     end
 
     def by_type(prefix : String) : Array(Row)
@@ -212,63 +236,119 @@ module TransFS
       end
     end
 
-    # The generalized query behind the query-path mount (§7): AND together one
-    # predicate per path segment and return the matching documents. Predicates
-    # commute (the AND is order-independent); an empty list matches all documents
-    # (the root query). Dynamic SQL with bound args — never string-interpolated
-    # values; only the STRUCTURAL column names (an allowlist) are interpolated.
-    def match(predicates : Array(Predicate)) : Array(Row2)
-      joins = [] of String
-      wheres = [] of String
-      join_args = [] of DB::Any
-      where_args = [] of DB::Any
-      tag_n = 0
+    # --- the query-path prefix-walk (§7 "tags as paths") ---
 
-      predicates.each do |p|
-        if (key = p.key)
-          if STRUCTURAL.includes?(key)
-            if key == "type"
-              # Friendly type match so `pdf`/`image` work against the full MIME:
-              # exact, major (`image/%`), or subtype (`%/pdf`).
-              wheres << "(d.type = ? OR d.type LIKE ? OR d.type LIKE ?)"
-              where_args << p.value << "#{p.value}/%" << "%/#{p.value}"
-            else
-              wheres << "d.#{key} = ?" # key from STRUCTURAL allowlist only
-              where_args << p.value
-            end
-          else
-            # A pinned tag predicate: one aliased join per tag so multiple tag
-            # predicates AND correctly (doc_tags PK => at most one match, no dup).
-            a = "t#{tag_n}"
-            tag_n += 1
-            joins << "JOIN doc_tags #{a} ON #{a}.doc_id = d.id " \
-                     "AND #{a}.key = ? AND #{a}.value = ?"
-            join_args << key << p.value
-          end
+    # Does any tag-path equal `prefix` or extend it (`prefix/...`)? Drives the
+    # walk's boundary detection: a segment extends the current partial iff this is
+    # true; otherwise the partial was a completed leaf and a new tag begins.
+    def tag_prefix_exists?(prefix : String) : Bool
+      return true if prefix.empty?
+      found = false
+      @db.query("SELECT 1 FROM doc_tags WHERE path = ? OR path LIKE ? ESCAPE '\\' LIMIT 1",
+        prefix, "#{escape_like(prefix)}/%") do |rs|
+        rs.each { found = true }
+      end
+      found
+    end
+
+    # Fold path components into a Walk: greedily extend the current partial while
+    # it stays a real tag-prefix; when a component can't extend it, the partial is
+    # a completed tag (an AND constraint) and the component starts a fresh tag.
+    def walk(components : Array(String)) : Walk
+      constraints = [] of String
+      partial = ""
+      valid = true
+      components.each do |c|
+        cand = partial.empty? ? c : "#{partial}/#{c}"
+        if tag_prefix_exists?(cand)
+          partial = cand
         else
-          # Bare value: OR across facets (parenthesized, so it ANDs with the rest
-          # as a unit). EXISTS — not joins — because a doc may match >1 arm.
-          wheres << "(d.type = ? OR d.type LIKE ? OR d.type LIKE ? " \
-                    "OR EXISTS (SELECT 1 FROM doc_tags b WHERE b.doc_id = d.id " \
-                    "AND b.key = ? AND b.value IS NULL) " \
-                    "OR EXISTS (SELECT 1 FROM doc_tags b WHERE b.doc_id = d.id " \
-                    "AND b.value = ?))"
-          where_args << p.value << "#{p.value}/%" << "%/#{p.value}" \
-            << p.value << p.value
+          constraints << partial unless partial.empty?
+          partial = c
+          valid = false unless tag_prefix_exists?(c)
         end
       end
+      Walk.new(constraints, partial, valid)
+    end
 
-      sql = String.build do |s|
-        s << "SELECT d.id, d.name, d.type, d.size, d.version_count, " \
-             "d.date_added, d.head_hash FROM documents d"
-        joins.each { |j| s << ' ' << j }
-        s << " WHERE " << wheres.join(" AND ") unless wheres.empty?
-        s << " ORDER BY d.date_added"
+    # The documents matching a walk (S), recency-windowed. Empty walk => recents.
+    def docs(walk : Walk, limit : Int32) : Array(Row2)
+      where, args = where_for(walk)
+      sql = "SELECT d.id, d.name, d.type, d.size, d.version_count, d.date_added, " \
+            "d.head_hash FROM documents d#{where} ORDER BY d.date_added DESC LIMIT ?"
+      args << limit.to_i64
+      query_rows2(sql, args)
+    end
+
+    # The facet entries at a walk position: the distinct next path-component among
+    # S's tag-paths with prefix `partial`, kept only if it would actually narrow S
+    # (some doc lacks it, or it branches further) — the §7 appearance rule.
+    def facets(walk : Walk) : Array(String)
+      ids = doc_ids(walk)
+      return [] of String if ids.empty?
+      total = ids.size
+      p = walk.partial
+      depth = p.empty? ? 0 : p.split('/').size
+      docs_by_comp = Hash(String, Set(String)).new
+      deeper_by_comp = Hash(String, Set(String)).new
+      each_tag_path(ids, p) do |doc_id, path|
+        comps = path.split('/')
+        next if comps.size <= depth # path == partial exactly: a leaf here, no child
+        c = comps[depth]
+        (docs_by_comp[c] ||= Set(String).new) << doc_id
+        if deeper = comps[depth + 1]?
+          (deeper_by_comp[c] ||= Set(String).new) << deeper
+        end
       end
+      all_comps = docs_by_comp.keys
+      splitting = all_comps.select do |c|
+        docs_by_comp[c].size < total || (deeper_by_comp[c]?.try(&.size) || 0) > 1
+      end
+      # Fallback: never hide *everything* — if nothing splits (e.g. a key whose one
+      # value is universal), show the candidates rather than an empty listing.
+      (splitting.empty? ? all_comps : splitting).sort
+    end
 
-      # JOIN placeholders precede WHERE placeholders in the assembled SQL, so the
-      # bound args must be join_args first, then where_args.
-      query_rows2(sql, join_args + where_args)
+    # WHERE clause (+ bound args) selecting docs that satisfy every constraint and
+    # the trailing partial — each an EXISTS over a tag-path prefix.
+    private def where_for(walk : Walk) : {String, Array(DB::Any)}
+      prefixes = walk.constraints.dup
+      prefixes << walk.partial unless walk.partial.empty?
+      return {"", [] of DB::Any} if prefixes.empty?
+      clauses = [] of String
+      args = [] of DB::Any
+      prefixes.each do |pre|
+        clauses << "EXISTS (SELECT 1 FROM doc_tags t WHERE t.doc_id = d.id " \
+                   "AND (t.path = ? OR t.path LIKE ? ESCAPE '\\'))"
+        args << pre << "#{escape_like(pre)}/%"
+      end
+      {" WHERE " + clauses.join(" AND "), args}
+    end
+
+    private def doc_ids(walk : Walk) : Array(String)
+      where, args = where_for(walk)
+      ids = [] of String
+      @db.query("SELECT d.id FROM documents d#{where}", args: args) do |rs|
+        rs.each { ids << rs.read(String) }
+      end
+      ids
+    end
+
+    # Yield (doc_id, path) for the given docs whose tag-path has prefix `prefix`
+    # (empty prefix => all their tag-paths).
+    private def each_tag_path(ids : Array(String), prefix : String, &)
+      return if ids.empty?
+      placeholders = Array.new(ids.size, "?").join(", ")
+      args = ids.map { |i| i.as(DB::Any) }
+      cond = ""
+      unless prefix.empty?
+        cond = " AND (path = ? OR path LIKE ? ESCAPE '\\')"
+        args << prefix << "#{escape_like(prefix)}/%"
+      end
+      @db.query("SELECT doc_id, path FROM doc_tags WHERE doc_id IN (#{placeholders})#{cond}",
+        args: args) do |rs|
+        rs.each { yield rs.read(String), rs.read(String) }
+      end
     end
 
     private def query_rows(sql : String, *args) : Array(Row)
@@ -306,26 +386,18 @@ module TransFS
 
     private def tags_for(id : String) : Array(String)
       out = [] of String
-      @db.query("SELECT key, value FROM doc_tags WHERE doc_id = ? ORDER BY key", id) do |rs|
-        rs.each do
-          k = rs.read(String)
-          v = rs.read(String?)
-          out << (v ? "#{k}=#{v}" : k)
-        end
+      @db.query("SELECT path FROM doc_tags WHERE doc_id = ? ORDER BY path", id) do |rs|
+        rs.each { out << rs.read(String) }
       end
       out
     end
 
     # --- helpers ---
 
-    # Split the key=value tag convention at index time (§6). First '=' splits;
-    # a bare tag has a nil value (boolean facet).
-    private def split_tag(tag : String) : {String, String?}
-      if i = tag.index('=')
-        {tag[0, i], tag[(i + 1)..]}
-      else
-        {tag, nil}
-      end
+    # Escape LIKE metacharacters so a tag-path used as a prefix matches literally
+    # (the queries pair this with `ESCAPE '\'`).
+    private def escape_like(s : String) : String
+      s.gsub('\\', "\\\\").gsub('%', "\\%").gsub('_', "\\_")
     end
 
     private def blob_size(hex : String) : Int64?

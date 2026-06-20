@@ -28,21 +28,25 @@ lib LibC
 end
 
 module TransFS
-  # A read-only FUSE view over the claim-log store: the **query-path mount**
-  # (docs/architecture.md §7). Every path *is* a query — each `/`-separated
-  # segment narrows a document set, descending = AND, segments commute. A path is
-  # a directory (the narrowed set, listed as document leaves) unless its final
-  # segment names a single leaf in the parent set (then it's a file).
+  # A read-only FUSE view over the claim-log store: the **facets-default
+  # query-path mount** (docs/architecture.md §7). Facets are the default view, so
+  # `ls /` is the facet menu (the tag keys) and what you `cd` into is what `ls`
+  # lists — POSIX-consistent. Navigation is a prefix-walk over hierarchical
+  # tag-paths (`Index#walk`); a lone `=` toggles to the document view, where the
+  # matching docs are *rendered* (recency-windowed) and a trailing segment names a
+  # leaf to read.
   #
-  # This is the FILTER-ONLY first slice. Two segment forms: a bare value
-  # (`vacation`) and a pinned `key=value` (`type=pdf`). Deferred to later slices:
-  # breakdown mode (the `=` enumerate marker), globs, ranges, `doc=`/`blob=`
-  # direct access, composites (dir-rendered manifests), and the computed
-  # recognition name (here, same-name collisions get a minimal `~id` suffix).
+  # Deferred to later slices: supersession (`add`/`set` verbs), composites
+  # (dir-rendered manifests), computed recognition names (here, same-name
+  # collisions get a minimal `~id` suffix), and literal `*` interpretation (the
+  # shell expands `*` against the listed facet keys for free).
   #
   # Read-only and honest about it: the mount is taken with `-o ro`, so the kernel
   # itself returns EROFS on writes (mutation is via the CLI).
   class FuseSystem < Fuse::FileSystem
+    # Recency window: a doc view lists at most this many most-recent matches.
+    RECENT_LIMIT = 200
+
     def initialize(@lib : Library)
       super()
     end
@@ -78,58 +82,60 @@ module TransFS
       end
     end
 
-    # The document leaf named by the path's final segment, if the parent query
-    # has exactly such a rendered leaf — the FILE branch of the grammar. File-
-    # first: a final segment that also parses as a predicate is treated as the
-    # file (so you can always `cat` it).
-    private def leaf_at(path : String) : Index::Row2?
-      segs = path.split('/').reject(&.empty?)
-      return nil if segs.empty?
-      preds = Query.parse(path)
-      parent = @lib.index.match(preds[0...-1])
-      final = segs.last
-      leaves(parent).find { |(name, _)| name == final }.try { |(_, row)| row }
-    end
-
-    # The rows of a directory path (the narrowed set), or nil if it is not a
-    # directory. Root ("/") is always a directory, even when empty; any other
-    # path that matches nothing is nil => ENOENT (an honest "no such query").
-    private def dir_rows(path : String) : Array(Index::Row2)?
-      preds = Query.parse(path)
-      rows = @lib.index.match(preds)
-      return rows if preds.empty? # root: a dir even if empty
-      rows.empty? ? nil : rows
+    # The document leaf named `name` in the doc view of `walk`, or nil.
+    private def leaf_row(walk : Index::Walk, name : String) : Index::Row2?
+      leaves(@lib.index.docs(walk, RECENT_LIMIT))
+        .find { |(n, _)| n == name }.try { |(_, row)| row }
     end
 
     def getattr(path : String) : Fuse::FileAttr | Int32
-      if row = leaf_at(path)
+      parsed = Query.parse(path)
+      walk = @lib.index.walk(parsed.components)
+      return -Errno::ENOENT.value unless walk.valid
+      if name = parsed.doc_name
+        row = leaf_row(walk, name)
+        return -Errno::ENOENT.value unless row
         hex = row.head_hash
         return -Errno::ENOENT.value unless hex
         real = @lib.blob_path(hex)
         return -Errno::ENOENT.value unless File.exists?(real)
         Fuse::FileAttr.file(size: File.size(real).to_i64, mode: 0o444)
-      elsif dir_rows(path)
-        Fuse::FileAttr.dir
       else
-        -Errno::ENOENT.value
+        Fuse::FileAttr.dir # facet view and doc listing are both directories
       end
     end
 
     def readdir(path : String) : Array(String) | Int32
-      rows = dir_rows(path)
-      return -Errno::ENOENT.value unless rows
-      [".", ".."] + leaves(rows).map { |(n, _)| n }
+      parsed = Query.parse(path)
+      walk = @lib.index.walk(parsed.components)
+      return -Errno::ENOENT.value unless walk.valid
+      return -Errno::ENOENT.value if parsed.doc_name # a file, not a directory
+      entries =
+        if parsed.doc_view
+          leaves(@lib.index.docs(walk, RECENT_LIMIT)).map { |(n, _)| n }
+        else
+          @lib.index.facets(walk)
+        end
+      [".", ".."] + entries
     end
 
     def open(path : String) : Int32
-      leaf_at(path) ? 0 : -Errno::ENOENT.value
+      parsed = Query.parse(path)
+      return -Errno::ENOENT.value unless name = parsed.doc_name
+      walk = @lib.index.walk(parsed.components)
+      return -Errno::ENOENT.value unless walk.valid
+      leaf_row(walk, name) ? 0 : -Errno::ENOENT.value
     end
 
     # Read by filling the kernel's own buffer directly (the zero-copy escape
     # hatch), streaming bytes from the leaf's head blob (index-only — the head
     # hash rides on the matched row, no log re-fold).
     def read(path : String, buffer : Bytes, offset : Int64, fi : Fuse::FileInfo) : Int32
-      row = leaf_at(path)
+      parsed = Query.parse(path)
+      return -Errno::ENOENT.value unless name = parsed.doc_name
+      walk = @lib.index.walk(parsed.components)
+      return -Errno::ENOENT.value unless walk.valid
+      row = leaf_row(walk, name)
       return -Errno::ENOENT.value unless row
       hex = row.head_hash
       return -Errno::ENOENT.value unless hex
