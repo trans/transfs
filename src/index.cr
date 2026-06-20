@@ -251,9 +251,23 @@ module TransFS
       found
     end
 
+    # Does a tag-path equal `path` exactly (a completed tag, not just a prefix)?
+    def tag_complete?(path : String) : Bool
+      return false if path.empty?
+      found = false
+      @db.query("SELECT 1 FROM doc_tags WHERE path = ? LIMIT 1", path) do |rs|
+        rs.each { found = true }
+      end
+      found
+    end
+
     # Fold path components into a Walk: greedily extend the current partial while
-    # it stays a real tag-prefix; when a component can't extend it, the partial is
-    # a completed tag (an AND constraint) and the component starts a fresh tag.
+    # it stays a real tag-prefix; a component that can't extend it starts a fresh
+    # tag (the old partial becomes an AND constraint). Crucially, when the partial
+    # reaches a COMPLETE tag it is committed as a constraint and reset to empty —
+    # so the next position enumerates the docs' *other* keys (co-facets), not just
+    # the (nonexistent) children of the completed leaf (§7: "P' is a stored tag =>
+    # reset").
     def walk(components : Array(String)) : Walk
       constraints = [] of String
       partial = ""
@@ -266,6 +280,10 @@ module TransFS
           constraints << partial unless partial.empty?
           partial = c
           valid = false unless tag_prefix_exists?(c)
+        end
+        if !partial.empty? && tag_complete?(partial)
+          constraints << partial
+          partial = ""
         end
       end
       Walk.new(constraints, partial, valid)

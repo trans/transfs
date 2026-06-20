@@ -288,6 +288,21 @@ module TransFS
           idx.facets(idx.walk(["tag"])).should eq ["vacation"]
         end
       end
+
+      it "shows co-facets after completing a tag (not an empty listing)" do
+        with_store do |fs|
+          with_file("p") { |f| d = fs.add(f, "q1.pdf"); fs.tag(d, add: ["project=acme", "finance", "stars=4"]) }
+          with_file("p") { |f| d = fs.add(f, "q2.pdf"); fs.tag(d, add: ["project=acme", "finance", "stars=5"]) }
+          with_file("m") { |f| d = fs.add(f, "notes.md"); fs.tag(d, add: ["project=acme", "work"]) }
+          idx = fs.index
+
+          # /project/acme/ is a completed tag: enumerate the OTHER splitting keys
+          facets = idx.facets(idx.walk(["project", "acme"]))
+          facets.should contain "stars"      # q1=4, q2=5 -> splits
+          facets.should contain "tag"        # finance vs work -> splits
+          facets.should_not contain "project" # already chosen; doesn't split
+        end
+      end
     end
   end
 end
