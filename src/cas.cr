@@ -1,4 +1,5 @@
 require "digest/sha256"
+require "random/secure"
 
 module TransFS
   # Content-addressable blob store. Blobs live at `<root>/blobs/<hh>/<hex>`,
@@ -25,15 +26,29 @@ module TransFS
 
     # Store *content*, returning its hex hash. Dedups: identical bytes hash to
     # the same path, so a re-store is a no-op. Writes to a temp file then
-    # renames, so a reader never sees a half-written blob.
+    # fsyncs + renames, so a reader never sees a half-written blob and a claim
+    # is not allowed to reference content that has not been forced durable.
     def put(content : Bytes) : String
       hex = Digest::SHA256.hexdigest(content)
       path = path_for(hex)
       unless File.exists?(path)
-        Dir.mkdir_p(File.dirname(path))
-        tmp = "#{path}.tmp.#{Process.pid}"
-        File.write(tmp, content)
-        File.rename(tmp, path)
+        dir = File.dirname(path)
+        Dir.mkdir_p(dir)
+        fsync_dir(@root)
+        fsync_dir(File.dirname(dir))
+        fsync_dir(dir)
+        tmp = "#{path}.tmp.#{Process.pid}.#{Random::Secure.hex(4)}"
+        begin
+          File.open(tmp, "w") do |file|
+            file.write(content)
+            file.fsync
+          end
+          File.rename(tmp, path)
+          fsync_dir(dir)
+        rescue ex
+          File.delete(tmp) if File.exists?(tmp)
+          raise ex
+        end
       end
       hex
     end
@@ -42,6 +57,18 @@ module TransFS
       path = path_for(hex)
       return nil unless File.exists?(path)
       File.read(path).to_slice
+    end
+
+    private def fsync_dir(path : String) : Nil
+      {% if flag?(:unix) %}
+        fd = LibC.open(path, LibC::O_RDONLY)
+        raise IO::Error.from_errno("Error opening directory for sync", target: path) if fd < 0
+        begin
+          IO::FileDescriptor.new(fd, close_on_finalize: false).fsync
+        ensure
+          LibC.close(fd)
+        end
+      {% end %}
     end
   end
 end
