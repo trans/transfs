@@ -15,6 +15,8 @@ license: MIT
 dependencies:
   crystalfuse:
     github: trans/crystalfuse
+  magic:
+    github: trans/magic.cr
   sqlite3:
     github: crystal-lang/crystal-sqlite3
   jargon:

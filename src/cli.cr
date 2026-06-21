@@ -1,6 +1,7 @@
 require "jargon"
 require "./library"
 require "./fusefs"
+require "./check"
 
 # The transfs CLI, driven by Jargon (>= 0.19). Each subcommand's interface is a
 # YAML schema under schemas/, embedded at COMPILE TIME via `read_file` so the
@@ -19,6 +20,7 @@ module TransFS
       "list"       => {{ read_file("#{__DIR__}/../schemas/list.yaml") }},
       "find"       => {{ read_file("#{__DIR__}/../schemas/find.yaml") }},
       "reindex"    => {{ read_file("#{__DIR__}/../schemas/reindex.yaml") }},
+      "check"      => {{ read_file("#{__DIR__}/../schemas/check.yaml") }},
       "cat"        => {{ read_file("#{__DIR__}/../schemas/cat.yaml") }},
       "show"       => {{ read_file("#{__DIR__}/../schemas/show.yaml") }},
       "versions"   => {{ read_file("#{__DIR__}/../schemas/versions.yaml") }},
@@ -50,6 +52,7 @@ module TransFS
       when "list"       then cmd_list
       when "find"       then cmd_find(result)
       when "reindex"    then cmd_reindex
+      when "check"      then cmd_check
       when "cat"        then cmd_cat(result)
       when "show"       then cmd_show(result)
       when "versions"   then cmd_versions(result)
@@ -128,8 +131,28 @@ module TransFS
     end
 
     private def cmd_reindex
-      @lib.index.rebuild
-      puts "reindexed #{@lib.index.all.size} documents"
+      index = @lib.index
+      index.rebuild
+      index.rebuild_warnings.each do |warning|
+        puts "warning: #{warning.path}: line #{warning.line_number}: ignored torn trailing record"
+      end
+      index.rebuild_errors.each do |error|
+        puts "error: #{error.path}: line #{error.line_number}: #{error.reason}"
+      end
+      puts "reindexed #{index.all.size} documents"
+      exit 1 unless index.rebuild_errors.empty?
+    end
+
+    private def cmd_check
+      result = Check.new(@lib.root).run
+      result.warnings.each do |warning|
+        puts "warning: #{warning.path}: #{warning.message}"
+      end
+      result.errors.each do |error|
+        puts "error: #{error.path}: #{error.message}"
+      end
+      puts "ok: #{result.documents} documents, #{result.blobs} blobs" if result.clean?
+      exit 1 unless result.clean?
     end
 
     private def cmd_mount(r)

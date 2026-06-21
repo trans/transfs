@@ -1,6 +1,6 @@
 require "db"
 require "sqlite3"
-require "mime"
+require "magic"
 require "set"
 require "./cas"
 require "./document"
@@ -21,9 +21,15 @@ module TransFS
   class Index
     @db : DB::Database
     @cas : CAS
+    @magic : Magic::Database
+    getter rebuild_errors : Array(Log::Corrupt)
+    getter rebuild_warnings : Array(Log::TornTail)
 
     def initialize(@root : String)
       @cas = CAS.new(@root)
+      @magic = Magic.open(Magic::Flag::MimeType)
+      @rebuild_errors = [] of Log::Corrupt
+      @rebuild_warnings = [] of Log::TornTail
       existed = File.exists?(db_path)
       Dir.mkdir_p(File.dirname(db_path))
       @db = DB.open("sqlite3://#{db_path}")
@@ -37,6 +43,7 @@ module TransFS
 
     def close
       @db.close
+      @magic.close
     end
 
     private def ensure_schema
@@ -102,13 +109,25 @@ module TransFS
 
     # Full rebuild from the logs — the disposable-cache guarantee made real.
     def rebuild : Nil
+      @rebuild_errors.clear
+      @rebuild_warnings.clear
       @db.exec "DELETE FROM documents"
       @db.exec "DELETE FROM versions"
       @db.exec "DELETE FROM doc_tags"
       @db.exec "DELETE FROM membership"
       @db.exec "DELETE FROM blob_refs"
       @db.transaction do
-        Document.all(@root).each { |doc| upsert(doc) }
+        Log.all_ids(@root).each do |id|
+          begin
+            result = Log.new(@root, id).read
+            if torn_tail = result.torn_tail
+              @rebuild_warnings << torn_tail
+            end
+            upsert(Document.fold(id, result.claims))
+          rescue ex : Log::Corrupt
+            @rebuild_errors << ex
+          end
+        end
       end
     end
 
@@ -123,7 +142,7 @@ module TransFS
 
       head = doc.head
       head_size = head ? blob_size(head) : nil
-      head_type = type_for(doc.name)
+      head_type = type_for(head)
 
       @db.exec(
         "INSERT INTO documents (id, head_hash, name, type, size, is_collection, " \
@@ -138,7 +157,7 @@ module TransFS
         @db.exec(
           "INSERT INTO versions (doc_id, hash, parent, seq, ts, size, type) " \
           "VALUES (?, ?, ?, ?, ?, ?, ?)",
-          doc.id, v.hash, v.parent, i, Claim.format_ts(v.ts), blob_size(v.hash), head_type
+          doc.id, v.hash, v.parent, i, Claim.format_ts(v.ts), blob_size(v.hash), type_for(v.hash)
         )
         @db.exec(
           "INSERT OR IGNORE INTO blob_refs (blob_hash, referrer) VALUES (?, ?)",
@@ -157,7 +176,7 @@ module TransFS
     # prefix-walk is uniform over user + derived facets.
     private def facet_paths(doc : Document) : Array(String)
       paths = [] of String
-      if t = type_for(doc.name) # e.g. "image/jpeg" -> "type/image/jpeg"
+      if t = type_for(doc.head) # e.g. "image/jpeg" -> "type/image/jpeg"
         paths << "type/#{t}"
       end
       paths << "owner/local" # owner column default until ownership lands
@@ -170,10 +189,10 @@ module TransFS
     end
 
     private def delete_rows(id : String) : Nil
-      @db.exec("DELETE FROM documents WHERE id = ?", id)        # PK is `id`
+      @db.exec("DELETE FROM documents WHERE id = ?", id) # PK is `id`
       @db.exec("DELETE FROM versions  WHERE doc_id = ?", id)
       @db.exec("DELETE FROM doc_tags  WHERE doc_id = ?", id)
-      @db.exec("DELETE FROM membership WHERE coll_id = ?", id)  # keyed by collection
+      @db.exec("DELETE FROM membership WHERE coll_id = ?", id) # keyed by collection
       @db.exec("DELETE FROM blob_refs WHERE referrer = ?", id)
     end
 
@@ -430,12 +449,14 @@ module TransFS
       File.exists?(path) ? File.size(path).to_i64 : nil
     end
 
-    # Interim type derivation from the name's extension. Real content-sniffing
-    # (a true content fact, §3) is a later refinement; this keeps /by-type
-    # queries working in the meantime.
-    private def type_for(name : String?) : String?
-      return nil unless name
-      MIME.from_filename?(name)
+    # Type is derived from the blob bytes via libmagic, not from the mutable name.
+    private def type_for(hex : String?) : String?
+      return nil unless hex
+      path = @cas.path_for(hex)
+      return nil unless File.exists?(path)
+      @magic.file(path)
+    rescue Magic::Error
+      nil
     end
 
     private def ts_str(t : Time?) : String?

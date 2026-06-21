@@ -46,8 +46,12 @@ module TransFS
     # Subclasses add their own fields between "op" and "ts".
     protected abstract def emit_fields(j : JSON::Builder)
 
-    # Parse one log line into a claim. Returns nil for a blank or unparseable
-    # line (the torn-tail / skip-bad rule lives in the log reader).
+    class ParseError < Exception
+    end
+
+    # Parse one log line into a claim. Returns nil only for blank lines or valid
+    # unknown future ops; malformed records raise so the log reader can tolerate
+    # only a torn final record.
     def self.parse(line : String) : Claim?
       line = line.strip
       return nil if line.empty?
@@ -68,8 +72,8 @@ module TransFS
       else
         nil # unknown op: ignore forward-compatibly
       end
-    rescue JSON::ParseException | KeyError | Time::Format::Error
-      nil
+    rescue ex : JSON::ParseException | KeyError | Time::Format::Error | TypeCastError
+      raise ParseError.new(ex.message || ex.class.name)
     end
   end
 

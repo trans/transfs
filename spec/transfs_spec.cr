@@ -5,6 +5,9 @@ require "file_utils"
 # Specs for the claim-log core (docs/architecture.md). These lock in the
 # truth-layer invariants proven by hand during slice 1 + the claim-ops slice.
 module TransFS
+  PDF_BYTES  = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n1 0 obj\n<<>>\nendobj\n"
+  JPEG_BYTES = "\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00"
+
   describe Library do
     describe "#add" do
       it "creates a document whose id is sha256 of its create claim" do
@@ -35,8 +38,8 @@ module TransFS
             with_file("dup\n") do |b|
               d1 = fs.add(a)
               d2 = fs.add(b)
-              d1.id.should_not eq d2.id      # distinct documents
-              d1.head.should eq d2.head      # one shared blob
+              d1.id.should_not eq d2.id # distinct documents
+              d1.head.should eq d2.head # one shared blob
               Dir.glob(File.join(root, "blobs", "*", "*")).size.should eq 1
             end
           end
@@ -125,7 +128,36 @@ module TransFS
               io.print %({"op":"name","name":"half-writ)
             end
             reloaded = Document.load(root, doc.id)
-            reloaded.name.should eq "Doc"  # torn line ignored
+            reloaded.name.should eq "Doc" # torn line ignored
+          end
+        end
+      end
+
+      it "raises on an unparseable middle line" do
+        with_store do |fs, root|
+          with_file("body") do |f|
+            doc = fs.add(f, "Doc")
+            log = Log.new(root, doc.id)
+            lines = File.read_lines(log.path)
+            lines.insert(1, %({"op":"name","name":"broken))
+            File.write(log.path, lines.join("\n") + "\n")
+
+            expect_raises(Log::Corrupt) do
+              Document.load(root, doc.id)
+            end
+          end
+        end
+      end
+
+      it "ignores valid unknown future ops" do
+        with_store do |fs, root|
+          with_file("body") do |f|
+            doc = fs.add(f, "Doc")
+            File.open(Log.new(root, doc.id).path, "a") do |io|
+              io.puts %({"op":"future","ts":"#{Claim.format_ts(Time.utc)}","field":"ok"})
+            end
+
+            Document.load(root, doc.id).name.should eq "Doc"
           end
         end
       end
@@ -199,11 +231,22 @@ module TransFS
       end
     end
 
-    it "finds by type derived from the name" do
+    it "finds by type derived from the blob content" do
       with_store do |fs|
-        with_file("img") { |f| fs.add(f, "pic.jpg") }
-        with_file("doc") { |f| fs.add(f, "paper.pdf") }
-        fs.index.by_type("image").map(&.name).should eq ["pic.jpg"]
+        with_file(JPEG_BYTES) { |f| fs.add(f, "not-an-image.txt") }
+        with_file(PDF_BYTES) { |f| fs.add(f, "paper.bin") }
+        fs.index.by_type("image").map(&.name).should eq ["not-an-image.txt"]
+      end
+    end
+
+    it "does not change type when a document is renamed" do
+      with_store do |fs|
+        with_file(PDF_BYTES) do |f|
+          doc = fs.add(f, "paper.pdf")
+          fs.index.by_type("application/pdf").map(&.id).should eq [doc.id]
+          doc = fs.rename(doc, "paper")
+          fs.index.by_type("application/pdf").map(&.id).should eq [doc.id]
+        end
       end
     end
 
@@ -227,9 +270,9 @@ module TransFS
 
     it "exposes the collision neighborhood (same name) for disambiguation" do
       with_store do |fs|
-        with_file("1") { |f| fs.add(f, "report.txt") }
-        with_file("2") { |f| fs.add(f, "report.txt") }
-        with_file("3") { |f| fs.add(f, "other.txt") }
+        with_file("one\n") { |f| fs.add(f, "report.txt") }
+        with_file("two\n") { |f| fs.add(f, "report.txt") }
+        with_file("three\n") { |f| fs.add(f, "other.txt") }
         fs.index.neighborhood("report.txt", "text/plain").size.should eq 2
       end
     end
@@ -239,8 +282,8 @@ module TransFS
       it "walks components into constraints + partial with exact value pairing" do
         with_store do |fs|
           a = ""
-          with_file("pdf") { |f| d = fs.add(f, "a.pdf"); fs.tag(d, add: ["vacation", "year=1920"]); a = d.id }
-          with_file("jpg") { |f| fs.add(f, "b.jpg") } # makes type/image a real prefix
+          with_file(PDF_BYTES) { |f| d = fs.add(f, "a.pdf"); fs.tag(d, add: ["vacation", "year=1920"]); a = d.id }
+          with_file(JPEG_BYTES) { |f| fs.add(f, "b.jpg") } # makes type/image a real prefix
           with_file("txt") { |f| d = fs.add(f, "c.txt"); fs.tag(d, add: ["year=2020", "stars=4"]) }
           idx = fs.index
 
@@ -262,8 +305,8 @@ module TransFS
       it "renders docs recency-windowed; empty walk = all docs (recents)" do
         with_store do |fs|
           a = b = c = ""
-          with_file("pdf") { |f| d = fs.add(f, "a.pdf"); fs.tag(d, add: ["vacation", "year=1920"]); a = d.id }
-          with_file("jpg") { |f| d = fs.add(f, "b.jpg"); fs.tag(d, add: ["vacation"]); b = d.id }
+          with_file(PDF_BYTES) { |f| d = fs.add(f, "a.pdf"); fs.tag(d, add: ["vacation", "year=1920"]); a = d.id }
+          with_file(JPEG_BYTES) { |f| d = fs.add(f, "b.jpg"); fs.tag(d, add: ["vacation"]); b = d.id }
           with_file("txt") { |f| d = fs.add(f, "c.txt"); fs.tag(d, add: ["year=2020", "stars=4"]); c = d.id }
           idx = fs.index
 
@@ -275,8 +318,8 @@ module TransFS
 
       it "enumerates splitting facet keys, then values, with the tag/ bucket" do
         with_store do |fs|
-          with_file("pdf") { |f| d = fs.add(f, "a.pdf"); fs.tag(d, add: ["vacation", "year=1920"]) }
-          with_file("jpg") { |f| d = fs.add(f, "b.jpg"); fs.tag(d, add: ["vacation"]) }
+          with_file(PDF_BYTES) { |f| d = fs.add(f, "a.pdf"); fs.tag(d, add: ["vacation", "year=1920"]) }
+          with_file(JPEG_BYTES) { |f| d = fs.add(f, "b.jpg"); fs.tag(d, add: ["vacation"]) }
           with_file("txt") { |f| d = fs.add(f, "c.txt"); fs.tag(d, add: ["year=2020", "stars=4"]) }
           idx = fs.index
 
@@ -298,9 +341,38 @@ module TransFS
 
           # /project/acme/ is a completed tag: enumerate the OTHER splitting keys
           facets = idx.facets(idx.walk(["project", "acme"]))
-          facets.should contain "stars"      # q1=4, q2=5 -> splits
-          facets.should contain "tag"        # finance vs work -> splits
+          facets.should contain "stars"       # q1=4, q2=5 -> splits
+          facets.should contain "tag"         # finance vs work -> splits
           facets.should_not contain "project" # already chosen; doesn't split
+        end
+      end
+    end
+  end
+
+  describe Check do
+    it "reports a torn trailing record as a warning" do
+      with_store do |fs, root|
+        with_file("body") do |f|
+          doc = fs.add(f, "Doc")
+          File.open(Log.new(root, doc.id).path, "a") do |io|
+            io.print %({"op":"name","name":"half-writ)
+          end
+
+          result = Check.new(root).run
+          result.errors.should be_empty
+          result.warnings.map(&.message).join("\n").should contain "ignored torn trailing record"
+        end
+      end
+    end
+
+    it "reports missing blobs referenced by version claims" do
+      with_store do |fs, root|
+        with_file("body") do |f|
+          doc = fs.add(f, "Doc")
+          File.delete(CAS.new(root).path_for(doc.head.not_nil!))
+
+          result = Check.new(root).run
+          result.errors.map(&.message).join("\n").should contain "version references missing blob"
         end
       end
     end

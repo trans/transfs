@@ -1,5 +1,6 @@
 require "spec"
 require "../src/library"
+require "../src/check"
 require "../src/query" # the mount path parser (not pulled in by the core library)
 
 # A scratch store under a temp dir, cleaned up after the block.
