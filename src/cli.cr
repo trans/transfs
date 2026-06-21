@@ -1,4 +1,5 @@
 require "jargon"
+require "./version"
 require "./library"
 require "./fusefs"
 require "./check"
