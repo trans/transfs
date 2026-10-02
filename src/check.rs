@@ -1,4 +1,4 @@
-use crate::{cas::Cas, claim::Claim, log::Log, Error, Result};
+use crate::{cas::Cas, claim::Claim, document::Document, log::Log, Error, Result};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
@@ -50,7 +50,7 @@ pub fn check(root: &Path) -> Result<CheckResult> {
                         ),
                     });
                 }
-                let creates: Vec<_> = read.claims.iter().filter_map(Claim::doc_id).collect();
+                let creates: HashSet<_> = read.claims.iter().filter_map(Claim::doc_id).collect();
                 if creates.len() != 1 {
                     result.errors.push(Issue {
                         path: path.clone(),
@@ -59,11 +59,30 @@ pub fn check(root: &Path) -> Result<CheckResult> {
                             creates.len()
                         ),
                     });
-                } else if creates[0] != id {
+                } else if !creates.contains(&id) {
                     result.errors.push(Issue {
                         path: path.clone(),
-                        message: format!("document id mismatch: create hashes to {}", creates[0]),
+                        message: format!(
+                            "document id mismatch: create hashes to {}",
+                            creates.iter().next().expect("one create ID")
+                        ),
                     });
+                }
+                match Document::fold(&id, &read.claims) {
+                    Ok(doc) if doc.has_conflicts() => result.warnings.push(Issue {
+                        path: path.clone(),
+                        message: format!(
+                            "unresolved claims: {} names, {} content heads, tag keys {:?}",
+                            doc.names.len(),
+                            doc.heads.len(),
+                            doc.tag_conflicts
+                        ),
+                    }),
+                    Ok(_) => {}
+                    Err(e) => result.errors.push(Issue {
+                        path: path.clone(),
+                        message: e.to_string(),
+                    }),
                 }
                 for claim in &read.claims {
                     if let Claim::Version { hash, .. } = claim {

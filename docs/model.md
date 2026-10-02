@@ -1,10 +1,11 @@
 # transfs — the model
 
-> **Status: proposal companion — not design.** Diagrams for
+> **Status: historical proposal companion — not current implementation.** Diagrams for
 > [`proposal-substrate.md`](proposal-substrate.md), drawn against
 > [`architecture.md`](architecture.md) and the current Crystal code. Where the two
-> disagree, `architecture.md` wins; where drawing the model exposed a gap in the
-> proposal, §6 says so.
+> disagree, `architecture.md` records the earlier v1 design; where drawing the
+> model exposed a gap in the proposal, §6 says so. The current Rust claim model
+> is in [the v2 plan](claim-model-plan.md) and source.
 >
 > Diagrams are Mermaid, which GitHub renders in place. To preview locally,
 > paste a block into [mermaid.live](https://mermaid.live).

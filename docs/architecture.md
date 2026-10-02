@@ -1,11 +1,13 @@
 # transfs — Architecture & Design
 
-> Status: **design**, partly implemented. This is the source of intent for
-> transfs's storage model, claims, index, mount, and CLI. The
+> Status: **historical v1 design**, partly implemented before the Rust claim
+> format 2 transition. It records the earlier storage model, claims, index,
+> mount, and CLI. The
 > [user guide](guide.md) describes what works today; the
 > [substrate proposal](proposal-substrate.md) explores a possible next design.
-> The [causal claim model plan](claim-model-plan.md) supersedes this document's
-> timestamp-ordered claims and blob-hash version parents for upcoming Rust work.
+> This document records the earlier v1 design. Its claim, log, version, index,
+> and mount examples are historical. The [causal claim model plan](claim-model-plan.md)
+> and Rust source define the current v2 behavior.
 >
 > Note: this hand-written design doc lives at `docs/architecture.md` and is
 > tracked. If you later run `crystal docs`, send generated API HTML to a

@@ -41,7 +41,7 @@ fn run() -> CliResult<i32> {
         env::current_dir()?.join(root)
     };
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
-        println!("transfs [--store DIR] <command> [args]\n\ncommands: add addversion rename tag untag set list find reindex check cat show versions mount");
+        println!("transfs [--store DIR] <command> [args]\n\ncommands: add addversion rename tag untag set list find reindex check cat show versions mount\n\naddversion ID FILE [--parents VERSION_ID,...]\ncat ID [VERSION_ID]");
         return Ok(0);
     }
     let command = args.remove(0);
@@ -63,11 +63,20 @@ fn run() -> CliResult<i32> {
         "addversion" => {
             let doc = resolve(&lib, &required(&mut args, "addversion needs an id")?)?;
             let file = required(&mut args, "addversion needs a file")?;
-            let doc = lib.add_version(&doc, Path::new(&file))?;
+            let doc = if args.first().is_some_and(|a| a == "--parents") {
+                args.remove(0);
+                let parents = required(&mut args, "--parents needs version IDs")?
+                    .split(',')
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                lib.add_version_from_at(&doc, &parents, Path::new(&file), chrono::Utc::now())?
+            } else {
+                lib.add_version(&doc, Path::new(&file))?
+            };
             update_index(&root, &doc)?;
             println!(
                 "added version {} to {} (now v{})",
-                doc.head().map(short).unwrap_or(""),
+                doc.head_id().map(short).unwrap_or(""),
                 short(&doc.id),
                 doc.version_count()
             );
@@ -158,41 +167,71 @@ fn run() -> CliResult<i32> {
         }
         "cat" => {
             let doc = resolve(&lib, &required(&mut args, "cat needs an id")?)?;
-            let bytes = lib.read(&doc)?.ok_or("document has no content")?;
+            let bytes = match args.first() {
+                Some(version_id) => lib.read_version(&doc, version_id)?,
+                None => lib.read(&doc)?,
+            }
+            .ok_or("document has no content")?;
             io::stdout().write_all(&bytes)?;
         }
         "show" => {
             let doc = resolve(&lib, &required(&mut args, "show needs an id")?)?;
             println!("id:        {}", doc.id);
-            println!("name:      {}", doc.name.as_deref().unwrap_or(""));
             println!(
-                "created:   {}",
-                doc.created_at.map(format_ts).unwrap_or_default()
+                "names:     {}",
+                doc.names
+                    .iter()
+                    .map(|n| n.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
+            println!("created:   {}", format_ts(doc.created_at));
             println!("versions:  {}", doc.version_count());
-            println!("head:      {}", doc.head().unwrap_or(""));
+            println!(
+                "heads:     {}",
+                doc.heads
+                    .iter()
+                    .map(|head| short(&head.id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             println!(
                 "tags:      {}",
                 doc.tags.into_iter().collect::<Vec<_>>().join(", ")
             );
+            if !doc.tag_conflicts.is_empty() {
+                println!(
+                    "tag conflicts: {}",
+                    doc.tag_conflicts.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
         }
         "versions" => {
             let doc = resolve(&lib, &required(&mut args, "versions needs an id")?)?;
             if doc.versions.is_empty() {
                 println!("(no versions)");
             }
-            for (i, version) in doc.versions.iter().enumerate() {
-                let marker = if i + 1 == doc.versions.len() {
+            for version in &doc.versions {
+                let marker = if doc.heads.iter().any(|head| head.id == version.id) {
                     "* "
                 } else {
                     "  "
                 };
-                let parent = version.parent.as_deref().map(short).unwrap_or("(root)");
+                let parents = if version.parents.is_empty() {
+                    "(root)".into()
+                } else {
+                    version
+                        .parents
+                        .iter()
+                        .map(|id| short(id))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
                 println!(
-                    "{marker}v{}  {}  parent={}  {}",
-                    i + 1,
+                    "{marker}{}  blob={}  parents={}  {}",
+                    short(&version.id),
                     short(&version.hash),
-                    parent,
+                    parents,
                     format_ts(version.ts)
                 );
             }
@@ -235,12 +274,23 @@ fn print_rows(rows: Vec<Row>) {
         return;
     }
     for row in rows {
+        let conflict = if row.tag_conflicts.is_empty() {
+            String::new()
+        } else {
+            format!(" tag-conflicts={}", row.tag_conflicts.join("|"))
+        };
         println!(
-            "{}  {:<24}  {:<16}  v{}  {}",
+            "{}  {:<24}  {:<16}  v{} heads={}{}  {}",
             short(&row.id),
-            row.name.as_deref().unwrap_or("(unnamed)"),
+            if row.names.is_empty() {
+                "(unnamed)".into()
+            } else {
+                row.names.join("|")
+            },
             row.mime_type.as_deref().unwrap_or(""),
             row.version_count,
+            row.heads.len(),
+            conflict,
             row.tags.join(",")
         );
     }

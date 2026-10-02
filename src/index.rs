@@ -73,12 +73,22 @@ impl Drop for Magic {
 pub struct Row {
     pub id: String,
     pub name: Option<String>,
+    pub names: Vec<String>,
     pub mime_type: Option<String>,
     pub size: Option<i64>,
     pub version_count: i64,
     pub date_added: String,
     pub head_hash: Option<String>,
+    pub heads: Vec<HeadRow>,
     pub tags: Vec<String>,
+    pub tag_conflicts: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadRow {
+    pub id: String,
+    pub hash: String,
+    pub size: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,7 +107,8 @@ pub struct Index {
     pub rebuild_warnings: Vec<TornTail>,
 }
 
-const FIELDS: &str = "d.id,d.name,d.type,d.size,d.version_count,d.date_added,d.head_hash";
+const FIELDS: &str =
+    "d.id,d.name,d.type,d.size,d.version_count,d.date_added,d.head_hash,d.tag_conflicts";
 
 impl Index {
     pub fn db_path(root: &Path) -> PathBuf {
@@ -109,6 +120,7 @@ impl Index {
         let existed = db_path.exists();
         fs::create_dir_all(db_path.parent().expect("index path has parent"))?;
         let conn = Connection::open(db_path)?;
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let mut this = Self {
             cas: Cas::new(&root),
             root,
@@ -118,22 +130,48 @@ impl Index {
             rebuild_warnings: vec![],
         };
         this.ensure_schema()?;
-        if !existed {
+        if !existed || schema_version < 3 {
             this.rebuild()?;
+            if !this.rebuild_errors.is_empty() {
+                return Err(Error::InvalidClaim(format!(
+                    "index rebuild rejected claim logs: {}",
+                    this.rebuild_errors.join("; ")
+                )));
+            }
+            this.conn.execute_batch("PRAGMA user_version=3")?;
         }
         Ok(this)
     }
     fn ensure_schema(&self) -> Result<()> {
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 3 {
+            self.conn.execute_batch(
+                "DROP TABLE IF EXISTS documents;
+                DROP TABLE IF EXISTS versions; DROP TABLE IF EXISTS doc_names;
+                DROP TABLE IF EXISTS doc_heads; DROP TABLE IF EXISTS doc_tags;
+                DROP TABLE IF EXISTS membership; DROP TABLE IF EXISTS blob_refs;",
+            )?;
+        }
         self.conn.execute_batch(
             "\
             CREATE TABLE IF NOT EXISTS documents (
                 id TEXT PRIMARY KEY, head_hash TEXT, name TEXT, type TEXT, size INTEGER,
                 is_collection INTEGER NOT NULL DEFAULT 0, owner TEXT NOT NULL DEFAULT 'local',
                 source TEXT, date_added TEXT NOT NULL, date_content TEXT,
-                version_count INTEGER NOT NULL DEFAULT 0);
+                version_count INTEGER NOT NULL DEFAULT 0,
+                tag_conflicts TEXT NOT NULL DEFAULT '[]');
             CREATE TABLE IF NOT EXISTS versions (
-                doc_id TEXT NOT NULL, hash TEXT NOT NULL, parent TEXT, seq INTEGER NOT NULL,
-                ts TEXT NOT NULL, size INTEGER, type TEXT, PRIMARY KEY(doc_id,seq));
+                doc_id TEXT NOT NULL, id TEXT NOT NULL, hash TEXT NOT NULL,
+                parents TEXT NOT NULL, ts TEXT NOT NULL, size INTEGER, type TEXT,
+                PRIMARY KEY(doc_id,id));
+            CREATE TABLE IF NOT EXISTS doc_names (
+                doc_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL,
+                PRIMARY KEY(doc_id,id));
+            CREATE TABLE IF NOT EXISTS doc_heads (
+                doc_id TEXT NOT NULL, id TEXT NOT NULL, hash TEXT NOT NULL,
+                size INTEGER, type TEXT, PRIMARY KEY(doc_id,id));
             CREATE TABLE IF NOT EXISTS doc_tags (
                 doc_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY(doc_id,path));
             CREATE TABLE IF NOT EXISTS membership (
@@ -143,6 +181,8 @@ impl Index {
             CREATE INDEX IF NOT EXISTS idx_documents_name_type ON documents(name,type);
             CREATE INDEX IF NOT EXISTS idx_doc_tags_path ON doc_tags(path);
             CREATE INDEX IF NOT EXISTS idx_versions_hash ON versions(hash);
+            CREATE INDEX IF NOT EXISTS idx_doc_names_name ON doc_names(name);
+            CREATE INDEX IF NOT EXISTS idx_doc_heads_type ON doc_heads(type);
         ",
         )?;
         Ok(())
@@ -154,6 +194,8 @@ impl Index {
         for table in [
             "documents",
             "versions",
+            "doc_names",
+            "doc_heads",
             "doc_tags",
             "membership",
             "blob_refs",
@@ -166,8 +208,10 @@ impl Index {
                     if let Some(tail) = read.torn_tail {
                         self.rebuild_warnings.push(tail);
                     }
-                    let doc = Document::fold(&id, &read.claims);
-                    upsert(&tx, &self.cas, &self.magic, &doc)?;
+                    match Document::fold(&id, &read.claims) {
+                        Ok(doc) => upsert(&tx, &self.cas, &self.magic, &doc)?,
+                        Err(e) => self.rebuild_errors.push(format!("{id}: {e}")),
+                    }
                 }
                 Err(Error::CorruptLog { path, line, reason }) => {
                     self.rebuild_errors
@@ -175,6 +219,10 @@ impl Index {
                 }
                 Err(e) => return Err(e),
             }
+        }
+        if !self.rebuild_errors.is_empty() {
+            tx.rollback()?;
+            return Ok(());
         }
         tx.commit()?;
         Ok(())
@@ -188,20 +236,32 @@ impl Index {
     fn query_rows<P: Params>(&self, sql: &str, params: P) -> Result<Vec<Row>> {
         let mut stmt = self.conn.prepare(sql)?;
         let iter = stmt.query_map(params, |r| {
+            let conflicts: String = r.get(7)?;
             Ok(Row {
                 id: r.get(0)?,
                 name: r.get(1)?,
+                names: vec![],
                 mime_type: r.get(2)?,
                 size: r.get(3)?,
                 version_count: r.get(4)?,
                 date_added: r.get(5)?,
                 head_hash: r.get(6)?,
+                heads: vec![],
                 tags: vec![],
+                tag_conflicts: serde_json::from_str(&conflicts).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
             })
         })?;
         let mut rows: Vec<Row> = iter.collect::<rusqlite::Result<_>>()?;
         for row in &mut rows {
             row.tags = self.tags_for(&row.id)?;
+            row.names = self.names_for(&row.id)?;
+            row.heads = self.heads_for(&row.id)?;
         }
         Ok(rows)
     }
@@ -213,6 +273,30 @@ impl Index {
             .query_map([id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows)
+    }
+    fn names_for(&self, id: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM doc_names WHERE doc_id=? ORDER BY id")?;
+        let names = stmt
+            .query_map([id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(names)
+    }
+    fn heads_for(&self, id: &str) -> Result<Vec<HeadRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id,hash,size FROM doc_heads WHERE doc_id=? ORDER BY id")?;
+        let heads = stmt
+            .query_map([id], |r| {
+                Ok(HeadRow {
+                    id: r.get(0)?,
+                    hash: r.get(1)?,
+                    size: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(heads)
     }
     pub fn all(&self) -> Result<Vec<Row>> {
         self.query_rows(
@@ -235,25 +319,25 @@ impl Index {
     }
     pub fn by_type(&self, prefix: &str) -> Result<Vec<Row>> {
         self.query_rows(
-            &format!("SELECT {FIELDS} FROM documents d WHERE d.type LIKE ? ORDER BY d.date_added"),
+            &format!("SELECT {FIELDS} FROM documents d WHERE EXISTS (SELECT 1 FROM doc_heads h WHERE h.doc_id=d.id AND h.type LIKE ?) ORDER BY d.date_added"),
             [format!("{prefix}%")],
         )
     }
     pub fn by_name(&self, substr: &str) -> Result<Vec<Row>> {
         self.query_rows(
-            &format!("SELECT {FIELDS} FROM documents d WHERE d.name LIKE ? ORDER BY d.date_added"),
+            &format!("SELECT {FIELDS} FROM documents d WHERE EXISTS (SELECT 1 FROM doc_names n WHERE n.doc_id=d.id AND n.name LIKE ?) ORDER BY d.date_added"),
             [format!("%{substr}%")],
         )
     }
     pub fn neighborhood(&self, name: &str, mime_type: Option<&str>) -> Result<Vec<Row>> {
         if let Some(mime_type) = mime_type {
             self.query_rows(
-                &format!("SELECT {FIELDS} FROM documents d WHERE d.name=? AND d.type=?"),
+                &format!("SELECT {FIELDS} FROM documents d WHERE EXISTS (SELECT 1 FROM doc_names n WHERE n.doc_id=d.id AND n.name=?) AND EXISTS (SELECT 1 FROM doc_heads h WHERE h.doc_id=d.id AND h.type=?)"),
                 params![name, mime_type],
             )
         } else {
             self.query_rows(
-                &format!("SELECT {FIELDS} FROM documents d WHERE d.name=?"),
+                &format!("SELECT {FIELDS} FROM documents d WHERE EXISTS (SELECT 1 FROM doc_names n WHERE n.doc_id=d.id AND n.name=?)"),
                 [name],
             )
         }
@@ -392,6 +476,8 @@ fn upsert(conn: &Connection, cas: &Cas, magic: &Magic, doc: &Document) -> Result
     for (table, col) in [
         ("documents", "id"),
         ("versions", "doc_id"),
+        ("doc_names", "doc_id"),
+        ("doc_heads", "doc_id"),
         ("doc_tags", "doc_id"),
         ("membership", "coll_id"),
         ("blob_refs", "referrer"),
@@ -401,19 +487,43 @@ fn upsert(conn: &Connection, cas: &Cas, magic: &Magic, doc: &Document) -> Result
     let head = doc.head();
     let head_size = head.and_then(|hash| blob_size(cas, hash));
     let head_type = head.and_then(|hash| type_for(cas, magic, hash));
-    let added = doc.created_at.map(format_ts).unwrap_or_default();
-    let content_date = doc.versions.last().map(|version| format_ts(version.ts));
-    conn.execute("INSERT INTO documents (id,head_hash,name,type,size,is_collection,owner,source,date_added,date_content,version_count) \
-        VALUES (?1,?2,?3,?4,?5,0,'local',NULL,?6,?7,?8)",
-        params![doc.id, head, doc.name, head_type, head_size, added, content_date, doc.version_count() as i64])?;
-    for (seq, version) in doc.versions.iter().enumerate() {
+    let added = format_ts(doc.created_at);
+    let content_date = doc
+        .versions
+        .iter()
+        .map(|version| version.ts)
+        .max()
+        .map(format_ts);
+    conn.execute("INSERT INTO documents (id,head_hash,name,type,size,is_collection,owner,source,date_added,date_content,version_count,tag_conflicts) \
+        VALUES (?1,?2,?3,?4,?5,0,'local',NULL,?6,?7,?8,?9)",
+        params![doc.id, head, doc.name, head_type, head_size, added, content_date, doc.version_count() as i64,
+            serde_json::to_string(&doc.tag_conflicts).expect("tag conflicts serialize")])?;
+    for name in &doc.names {
         conn.execute(
-            "INSERT INTO versions (doc_id,hash,parent,seq,ts,size,type) VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO doc_names (doc_id,id,name) VALUES (?,?,?)",
+            params![doc.id, name.id, name.value],
+        )?;
+    }
+    for head in &doc.heads {
+        conn.execute(
+            "INSERT INTO doc_heads (doc_id,id,hash,size,type) VALUES (?,?,?,?,?)",
             params![
                 doc.id,
+                head.id,
+                head.hash,
+                blob_size(cas, &head.hash),
+                type_for(cas, magic, &head.hash)
+            ],
+        )?;
+    }
+    for version in &doc.versions {
+        conn.execute(
+            "INSERT INTO versions (doc_id,id,hash,parents,ts,size,type) VALUES (?,?,?,?,?,?,?)",
+            params![
+                doc.id,
+                version.id,
                 version.hash,
-                version.parent,
-                seq as i64,
+                serde_json::to_string(&version.parents).expect("parents serialize"),
                 format_ts(version.ts),
                 blob_size(cas, &version.hash),
                 type_for(cas, magic, &version.hash)
@@ -425,8 +535,10 @@ fn upsert(conn: &Connection, cas: &Cas, magic: &Magic, doc: &Document) -> Result
         )?;
     }
     let mut paths = BTreeSet::new();
-    if let Some(mime) = head_type {
-        paths.insert(format!("type/{mime}"));
+    for head in &doc.heads {
+        if let Some(mime) = type_for(cas, magic, &head.hash) {
+            paths.insert(format!("type/{mime}"));
+        }
     }
     paths.insert("owner/local".into());
     for tag in &doc.tags {

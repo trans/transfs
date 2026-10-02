@@ -259,8 +259,8 @@ and leaves the storage savings to be measured on the remaining workload.
 ## 6. Validation Plan for Pandora and transfs
 
 The [causal claim model plan](claim-model-plan.md) details the first gate for
-the Rust repository, including legacy-log compatibility and read behavior at
-unresolved forks.
+the Rust repository, including on-disk format and read behavior at unresolved
+forks.
 
 The first implementation changes the claim model in Rust, while no real
 transfs stores need migration. It needs no R2 bucket or object-store mock.
@@ -273,10 +273,8 @@ Work through these gates in order:
    remain visible until a later rename supersedes both; rename plus tag do
    not conflict; concurrent tag add/remove and two `set`s obey their chosen
    field rules; content A → B → A's exact bytes stays acyclic; two edits from
-   one base make two heads. Test missed pub/sub announcements, a drop request
-   seen by all writers, an unseen concurrent edit that cancels it, and
-   retirement of a writer that never returns. The SQLite index and CLI must
-   show forks rather than hiding them behind log order.
+   one base make two heads. The SQLite index, CLI, and FUSE mount must show
+   forks rather than hiding them behind log order.
 2. **Measure chunk sharing before building an RRB tree.** Run a read-only
    content-defined chunking experiment over representative whole-file saves:
    the 171 named `.xcf` files in Silicon Circus (about 371 MB here), their archived history where
@@ -302,6 +300,10 @@ Work through these gates in order:
    verify the complete-content hash. Inject crashes before ref publication.
    Test representation conversion, published full-blob availability, stale
    writer refs, and garbage collection without losing unresolved heads.
+   Specify the active-writer roster and two-phase drop here: test missed
+   pub/sub announcements, an offline concurrent edit canceling a pending
+   drop, all-writer observation, and authority retirement of a writer that
+   never returns. A sole active writer can finalize its own drop immediately.
 
 Correct causal state and recoverability are mandatory. The chunk measurement
 decides whether RRB work is justified now or should wait for a Pandora editor.

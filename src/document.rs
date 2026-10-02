@@ -1,67 +1,84 @@
-use crate::{claim::Claim, log::Log, Result};
+use crate::{
+    causal::{CausalSet, FieldValue, TagValue, VersionValue},
+    claim::Claim,
+    log::Log,
+    Error, Result,
+};
 use chrono::{DateTime, Utc};
 use std::{collections::BTreeSet, path::Path};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Version {
-    pub hash: String,
-    pub parent: Option<String>,
-    pub ts: DateTime<Utc>,
-}
+pub type Version = VersionValue;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Document {
     pub id: String,
+    /// Singleton name for callers that require one unambiguous label.
     pub name: Option<String>,
-    pub created_at: Option<DateTime<Utc>>,
+    pub names: Vec<FieldValue>,
+    pub created_at: DateTime<Utc>,
     pub versions: Vec<Version>,
+    pub heads: Vec<Version>,
+    /// Deepest paths for facets and display; claim IDs stay in tag_assertions.
     pub tags: BTreeSet<String>,
+    pub tag_assertions: Vec<TagValue>,
+    pub tag_conflicts: BTreeSet<String>,
 }
 
 impl Document {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            name: None,
-            created_at: None,
-            versions: vec![],
-            tags: BTreeSet::new(),
-        }
-    }
     pub fn head(&self) -> Option<&str> {
-        self.versions.last().map(|v| v.hash.as_str())
+        (self.heads.len() == 1).then(|| self.heads[0].hash.as_str())
     }
+
+    pub fn head_id(&self) -> Option<&str> {
+        (self.heads.len() == 1).then(|| self.heads[0].id.as_str())
+    }
+
     pub fn version_count(&self) -> usize {
         self.versions.len()
     }
-    pub fn fold(id: impl Into<String>, claims: &[Claim]) -> Self {
-        let mut doc = Self::new(id);
-        let mut ordered: Vec<_> = claims.iter().enumerate().collect();
-        ordered.sort_by_key(|(index, claim)| (claim.ts(), *index));
-        for (_, claim) in ordered {
-            match claim {
-                Claim::Create { ts, .. } => doc.created_at = Some(*ts),
-                Claim::Version { hash, parent, ts } => doc.versions.push(Version {
-                    hash: hash.clone(),
-                    parent: parent.clone(),
-                    ts: *ts,
-                }),
-                Claim::Name { name, .. } => doc.name = Some(name.clone()),
-                Claim::Tag { add, del, .. } => {
-                    for tag in del {
-                        doc.tags.remove(&normalize_tag(tag));
-                    }
-                    for tag in add {
-                        doc.tags.insert(normalize_tag(tag));
-                    }
-                }
+
+    pub fn has_conflicts(&self) -> bool {
+        self.names.len() > 1 || self.heads.len() > 1 || !self.tag_conflicts.is_empty()
+    }
+
+    pub fn fold(id: impl Into<String>, claims: &[Claim]) -> Result<Self> {
+        let id = id.into();
+        if !matches!(claims.first(), Some(Claim::Create { .. })) {
+            return Err(Error::InvalidClaim("first claim must be create".into()));
+        }
+        let set = CausalSet::from_claims(claims.iter().cloned())?;
+        let mut creates = Vec::new();
+        for claim in set.claims().values() {
+            if let Claim::Create { ts, .. } = claim {
+                creates.push((claim.id()?, *ts));
             }
         }
-        doc
+        if creates.len() != 1 || creates[0].0 != id {
+            return Err(Error::InvalidClaim(format!(
+                "document {id} has no matching unique create claim"
+            )));
+        }
+        let state = set.fold()?;
+        let name = (state.names.len() == 1).then(|| state.names[0].value.clone());
+        let tags = state.projected_tags();
+        let tag_conflicts = state.tag_conflict_keys();
+        Ok(Self {
+            id,
+            name,
+            names: state.names,
+            created_at: creates[0].1,
+            versions: state.versions,
+            heads: state.heads,
+            tags,
+            tag_assertions: state.tags,
+            tag_conflicts,
+        })
     }
+
     pub fn load(root: &Path, id: &str) -> Result<Self> {
-        Ok(Self::fold(id, &Log::new(root, id).read()?.claims))
+        Self::fold(id, &Log::new(root, id).read()?.claims)
     }
+
     pub fn all(root: &Path) -> Result<Vec<Self>> {
         Log::all_ids(root)?
             .into_iter()

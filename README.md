@@ -3,9 +3,8 @@
 transfs is an experimental content-addressed file archive. It stores file
 bytes once by SHA-256 and keeps each document's name, tags, and version history
 in an append-only claim log. SQLite is a rebuildable index, not the source of
-truth. This Rust implementation can read stores written by the original
-[Crystal transfs](https://github.com/trans/transfs.cr), and Crystal can read its
-stores.
+truth. The original [Crystal transfs](https://github.com/trans/transfs.cr) is
+retired; the Rust claim format is the only supported store format.
 
 The library provides claims, the blob store, log replay, document mutations,
 query-path parsing, and integrity checking. The native build adds a SQLite and
@@ -45,14 +44,14 @@ mkdir -p demo/mnt
 cargo run -- --store demo/store mount demo/mnt
 ```
 
-The mount is read-only, matching the current Crystal implementation. It presents
+The mount is read-only. It presents
 facets as directories; a lone `=` switches to matching documents. The FUSE API
 supports writes, but transfs has not defined the commit behavior for edits
-through a mount. A live host smoke test on 2026-10-02 passed facet and document
-listing, content reads, filesystem statistics, and read-only rejection.
+through a mount. The earlier Rust mount passed a live host smoke test on
+2026-10-02; the claim format 2 mount still needs that host check.
 
 To check a live mount on a host with `/dev/fuse`, run these `just` tasks. The
-example store stays under ignored `target/fuse-smoke/`.
+example store stays under ignored `target/fuse-smoke-v2/`.
 
 ```sh
 just fuse-device
@@ -81,8 +80,7 @@ The store layout is:
 ```
 
 The database is disposable. Delete it or run `transfs reindex` to rebuild it
-from the claim logs. The tests include Crystal-produced claim fixtures and
-cross-language store compatibility checks.
+from the claim logs.
 
 ## Design notes
 
@@ -94,3 +92,4 @@ The [data-centric architecture whitepaper](docs/data_centric_architecture_archit
 proposes a shared Pandora/transfs storage engine and a plan to test it.
 The [causal claim model plan](docs/claim-model-plan.md) breaks the first
 implementation gate into concrete changes and checks.
+The [claim format 2 specification](docs/claim-format-v2.md) pins durable claim IDs.

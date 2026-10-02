@@ -1,6 +1,6 @@
 //! Read-only query-path FUSE mount. The view logic is testable without /dev/fuse.
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{CString, OsStr},
     fs::File,
     os::unix::{ffi::OsStrExt, fs::FileExt},
@@ -56,12 +56,9 @@ impl MountView {
                 return Ok(None);
             };
             let hash = row.head_hash.expect("leaves only includes headed rows");
-            let Ok(meta) = std::fs::metadata(self.cas.path_for(&hash)) else {
-                return Ok(None);
-            };
             Ok(Some(Node::File {
                 hash,
-                size: meta.len(),
+                size: row.size.unwrap_or(0).max(0) as u64,
             }))
         } else {
             Ok(Some(Node::Directory))
@@ -79,9 +76,15 @@ impl MountView {
             let entries = leaves(index.docs(&walk, None)?)
                 .into_iter()
                 .filter_map(|(name, row)| {
-                    let hash = row.head_hash?;
-                    let size = std::fs::metadata(self.cas.path_for(&hash)).ok()?.len();
-                    Some((name, Node::File { hash, size }))
+                    row.head_hash.map(|hash| {
+                        (
+                            name,
+                            Node::File {
+                                hash,
+                                size: row.size.unwrap_or(0).max(0) as u64,
+                            },
+                        )
+                    })
                 })
                 .collect();
             Ok(Some(entries))
@@ -109,34 +112,111 @@ impl MountView {
     }
 }
 
-/// Minimal temporary suffix used by the Crystal mount for same-name documents.
+/// A current name is visible for every current content head. Suffixes keep
+/// both same-name documents and forks independently addressable.
 pub fn leaves(rows: Vec<Row>) -> Vec<(String, Row)> {
-    let rows: Vec<_> = rows
-        .into_iter()
-        .filter(|row| row.head_hash.is_some())
-        .collect();
-    let mut counts: HashMap<Option<String>, usize> = HashMap::new();
-    for row in &rows {
-        *counts.entry(row.name.clone()).or_default() += 1;
+    struct Candidate {
+        base: String,
+        row: Row,
+        doc_suffix: bool,
+        version_suffix: bool,
+        doc_len: usize,
+        version_len: usize,
     }
-    rows.into_iter()
-        .map(|row| {
-            let base = row
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("untitled-{}", row.id.get(..8).unwrap_or(&row.id)));
-            let name = if counts.get(&row.name).copied().unwrap_or(0) > 1 {
-                disambiguate(&base, &row.id)
-            } else {
-                base
-            };
-            (name, row)
-        })
-        .collect()
+    let mut owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for row in &rows {
+        let names: BTreeSet<_> = if row.names.is_empty() {
+            [format!("untitled-{}", row.id.get(..8).unwrap_or(&row.id))].into()
+        } else {
+            row.names.iter().cloned().collect()
+        };
+        for name in names {
+            owners.entry(name).or_default().insert(row.id.clone());
+        }
+    }
+    let mut candidates = Vec::new();
+    for row in rows {
+        let names: BTreeSet<_> = if row.names.is_empty() {
+            [format!("untitled-{}", row.id.get(..8).unwrap_or(&row.id))].into()
+        } else {
+            row.names.iter().cloned().collect()
+        };
+        let heads = if row.heads.is_empty() {
+            row.head_hash
+                .as_ref()
+                .map(|hash| {
+                    vec![crate::index::HeadRow {
+                        id: row.id.clone(),
+                        hash: hash.clone(),
+                        size: row.size,
+                    }]
+                })
+                .unwrap_or_default()
+        } else {
+            row.heads.clone()
+        };
+        for name in names {
+            for head in &heads {
+                let mut leaf = row.clone();
+                leaf.name = Some(name.clone());
+                leaf.head_hash = Some(head.hash.clone());
+                leaf.size = head.size;
+                leaf.heads = vec![head.clone()];
+                candidates.push(Candidate {
+                    base: name.clone(),
+                    doc_suffix: owners.get(&name).is_some_and(|ids| ids.len() > 1),
+                    version_suffix: heads.len() > 1,
+                    doc_len: 4,
+                    version_len: 8,
+                    row: leaf,
+                });
+            }
+        }
+    }
+    let label = |c: &Candidate| {
+        let mut suffix = String::new();
+        if c.doc_suffix {
+            suffix.push_str(&format!("~{}", &c.row.id[..c.doc_len.min(c.row.id.len())]));
+        }
+        if c.version_suffix {
+            let id = &c.row.heads[0].id;
+            suffix.push_str(&format!("~{}", &id[..c.version_len.min(id.len())]));
+        }
+        disambiguate(&c.base, &suffix)
+    };
+    loop {
+        let mut seen: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (i, candidate) in candidates.iter().enumerate() {
+            seen.entry(label(candidate)).or_default().push(i);
+        }
+        let duplicates: Vec<_> = seen
+            .into_values()
+            .filter(|group| group.len() > 1)
+            .flatten()
+            .collect();
+        if duplicates.is_empty() {
+            break;
+        }
+        let mut grew = false;
+        for i in duplicates {
+            let c = &mut candidates[i];
+            if c.doc_suffix && c.doc_len < c.row.id.len() {
+                c.doc_len = (c.doc_len + 4).min(c.row.id.len());
+                grew = true;
+            }
+            if c.version_suffix && c.version_len < c.row.heads[0].id.len() {
+                c.version_len = (c.version_len + 4).min(c.row.heads[0].id.len());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    candidates.into_iter().map(|c| (label(&c), c.row)).collect()
 }
 
-fn disambiguate(base: &str, id: &str) -> String {
-    let suffix = format!("~{}", id.get(..4).unwrap_or(id));
+fn disambiguate(base: &str, suffix: &str) -> String {
     match base.rfind('.') {
         Some(dot) if dot > 0 => format!("{}{}{}", &base[..dot], suffix, &base[dot..]),
         _ => format!("{base}{suffix}"),

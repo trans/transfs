@@ -1,9 +1,9 @@
 # Proposal: transfs as the substrate for curio and DataDungeon
 
 > **Status: proposal — not design.** This is the case for a direction and the
-> shape it would take, written to be argued with. `architecture.md` remains the
-> source of intent for transfs itself; nothing here changes it until a decision
-> is made and the relevant parts are folded in there.
+> shape it would take, written to be argued with. Its Crystal-era claim and
+> blob-parent examples are historical; [the v2 plan](claim-model-plan.md)
+> records the current Rust direction.
 >
 > Drafted 2026-10-01 from a working session across curio, DataDungeon and
 > transfs. Figures are measured on the live Silicon Circus store and the dev

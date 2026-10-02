@@ -371,6 +371,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "merkle-champ"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3cbdf1662e86b92d45dd9cd5df7cc7a70198b4d6fdd631078cd62b546732b77f"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -771,6 +780,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "libc",
+ "merkle-champ",
  "rand",
  "rusqlite",
  "serde",

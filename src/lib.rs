@@ -1,5 +1,6 @@
 //! Portable claim-log and content store. Native indexing is a separate module.
 pub mod cas;
+pub mod causal;
 pub mod check;
 pub mod claim;
 pub mod document;
@@ -28,6 +29,8 @@ pub enum Error {
     },
     #[error("ambiguous id prefix '{prefix}' ({matches} matches)")]
     AmbiguousId { prefix: String, matches: usize },
+    #[error("document {id} has multiple content heads: {heads:?}; select a version")]
+    AmbiguousHead { id: String, heads: Vec<String> },
     #[error("native library error: {0}")]
     Native(String),
     #[cfg(feature = "native")]

@@ -44,14 +44,40 @@ impl Log {
     }
     pub fn append(&self, claims: &[Claim]) -> Result<()> {
         let path = self.path();
+        let mut combined = if path.exists() {
+            let existing = self.read()?;
+            if existing.torn_tail.is_some() {
+                return Err(Error::InvalidClaim(
+                    "repair torn log tail before appending".into(),
+                ));
+            }
+            if claims
+                .iter()
+                .any(|claim| matches!(claim, Claim::Create { .. }))
+            {
+                return Err(Error::InvalidClaim("duplicate create claim".into()));
+            }
+            existing.claims
+        } else if !matches!(claims.first(), Some(Claim::Create { .. })) {
+            return Err(Error::InvalidClaim(
+                "new log must start with a v2 create claim".into(),
+            ));
+        } else {
+            Vec::new()
+        };
+        combined.extend_from_slice(claims);
+        crate::document::Document::fold(&self.id, &combined)?;
+        let mut bytes = Vec::new();
+        for claim in claims {
+            bytes.extend_from_slice(claim.to_json_line()?.as_bytes());
+            bytes.push(b'\n');
+        }
         fs::create_dir_all(path.parent().expect("log path has parent"))?;
         let mut file = fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(path)?;
-        for claim in claims {
-            writeln!(file, "{}", claim.to_json_line())?;
-        }
+        file.write_all(&bytes)?;
         file.flush()?;
         file.sync_all()?;
         Ok(())
@@ -68,8 +94,15 @@ impl Log {
             }
             Err(e) => return Err(e.into()),
         };
+        if bytes.is_empty() {
+            return Ok(ReadResult {
+                claims: vec![],
+                torn_tail: None,
+            });
+        }
+        let unterminated = bytes.last() != Some(&b'\n');
         let mut lines: Vec<_> = bytes.split(|b| *b == b'\n').collect();
-        if bytes.last() == Some(&b'\n') {
+        if !unterminated {
             lines.pop();
         }
         let mut claims = vec![];
@@ -77,17 +110,34 @@ impl Log {
         for (index, line) in lines.iter().enumerate() {
             let parsed = std::str::from_utf8(line)
                 .map_err(|e| Error::InvalidClaim(e.to_string()))
-                .and_then(Claim::parse);
+                .and_then(|line| {
+                    if line.trim().is_empty() {
+                        Ok(None)
+                    } else {
+                        Claim::from_json_line(line).map(Some)
+                    }
+                });
+            if unterminated && index + 1 == lines.len() {
+                let reason = parsed
+                    .err()
+                    .map_or_else(|| "missing terminating newline".into(), |e| e.to_string());
+                if index == 0 {
+                    return Err(Error::CorruptLog {
+                        path: path.clone(),
+                        line: 1,
+                        reason,
+                    });
+                }
+                torn_tail = Some(TornTail {
+                    path: path.clone(),
+                    line: index + 1,
+                    reason,
+                });
+                continue;
+            }
             match parsed {
                 Ok(Some(claim)) => claims.push(claim),
                 Ok(None) => {}
-                Err(e) if index + 1 == lines.len() => {
-                    torn_tail = Some(TornTail {
-                        path: path.clone(),
-                        line: index + 1,
-                        reason: e.to_string(),
-                    })
-                }
                 Err(e) => {
                     return Err(Error::CorruptLog {
                         path: path.clone(),

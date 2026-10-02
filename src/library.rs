@@ -1,5 +1,6 @@
 use crate::{
     cas::Cas,
+    causal::mint_nonce,
     claim::Claim,
     document::{normalize_tag, Document},
     log::Log,
@@ -7,6 +8,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -25,13 +27,16 @@ impl Library {
             root,
         }
     }
+
     fn append_and_load(&self, id: &str, claims: &[Claim]) -> Result<Document> {
         Log::new(&self.root, id).append(claims)?;
         Document::load(&self.root, id)
     }
+
     pub fn add(&self, path: &Path, name: Option<&str>) -> Result<Document> {
         self.add_at(path, name, Utc::now())
     }
+
     pub fn add_at(&self, path: &Path, name: Option<&str>, ts: DateTime<Utc>) -> Result<Document> {
         let hash = self.cas.put(&fs::read(path)?)?;
         let create = Claim::mint(ts);
@@ -47,48 +52,99 @@ impl Library {
             &[
                 create,
                 Claim::Version {
-                    hash,
-                    parent: None,
+                    nonce: mint_nonce(),
                     ts,
+                    hash,
+                    parents: vec![],
                 },
-                Claim::Name { name: label, ts },
+                Claim::Name {
+                    nonce: mint_nonce(),
+                    ts,
+                    name: label,
+                    supersedes: vec![],
+                },
             ],
         )
     }
+
     pub fn add_version(&self, doc: &Document, path: &Path) -> Result<Document> {
         self.add_version_at(doc, path, Utc::now())
     }
+
     pub fn add_version_at(
         &self,
         doc: &Document,
         path: &Path,
         ts: DateTime<Utc>,
     ) -> Result<Document> {
+        let base = doc.head_id().ok_or_else(|| Error::AmbiguousHead {
+            id: doc.id.clone(),
+            heads: doc.heads.iter().map(|head| head.id.clone()).collect(),
+        })?;
+        self.add_version_from_at(doc, &[base.to_owned()], path, ts)
+    }
+
+    /// Explicit parents allow a conflict resolution version to join all heads.
+    /// Passing a stale snapshot is safe: its old parent creates a visible fork.
+    pub fn add_version_from_at(
+        &self,
+        doc: &Document,
+        parents: &[String],
+        path: &Path,
+        ts: DateTime<Utc>,
+    ) -> Result<Document> {
+        if parents.is_empty() {
+            return Err(Error::InvalidClaim(
+                "version needs an observed parent".into(),
+            ));
+        }
+        let mut resolved = Vec::new();
+        for prefix in parents {
+            let matches: Vec<_> = doc
+                .versions
+                .iter()
+                .filter(|version| version.id.starts_with(prefix))
+                .collect();
+            if matches.len() != 1 {
+                return Err(Error::InvalidClaim(format!(
+                    "parent prefix {prefix} matches {} observed versions",
+                    matches.len()
+                )));
+            }
+            resolved.push(matches[0].id.clone());
+        }
         let hash = self.cas.put(&fs::read(path)?)?;
         self.append_and_load(
             &doc.id,
             &[Claim::Version {
-                hash,
-                parent: doc.head().map(str::to_owned),
+                nonce: mint_nonce(),
                 ts,
+                hash,
+                parents: resolved,
             }],
         )
     }
+
     pub fn rename(&self, doc: &Document, name: &str) -> Result<Document> {
         self.rename_at(doc, name, Utc::now())
     }
+
     pub fn rename_at(&self, doc: &Document, name: &str, ts: DateTime<Utc>) -> Result<Document> {
         self.append_and_load(
             &doc.id,
             &[Claim::Name {
-                name: name.into(),
+                nonce: mint_nonce(),
                 ts,
+                name: name.into(),
+                supersedes: doc.names.iter().map(|value| value.id.clone()).collect(),
             }],
         )
     }
+
     pub fn tag(&self, doc: &Document, add: &[String], del: &[String]) -> Result<Document> {
         self.tag_at(doc, add, del, Utc::now())
     }
+
     pub fn tag_at(
         &self,
         doc: &Document,
@@ -96,56 +152,48 @@ impl Library {
         del: &[String],
         ts: DateTime<Utc>,
     ) -> Result<Document> {
-        let normalize = |tags: &[String]| -> Vec<String> {
-            let mut values = Vec::new();
-            for tag in tags {
-                let path = normalize_tag(tag);
-                if !path.is_empty() && !values.contains(&path) {
-                    values.push(path);
-                }
-            }
-            values
-        };
-        let add_paths = normalize(add);
-        let del_paths = normalize(del);
-        let mut current = doc.tags.clone();
-        let mut effective_add = Vec::new();
-        let mut effective_del = del_paths.clone();
-        for tag in &del_paths {
-            current.remove(tag);
-        }
-        for tag in add_paths {
-            if current
+        let mut claims = Vec::new();
+        for path in normalized_paths(del) {
+            let removes: Vec<_> = doc
+                .tag_assertions
                 .iter()
-                .any(|existing| existing == &tag || tag_prefix(&tag, existing))
-            {
-                continue;
+                .filter(|tag| tag.value == path)
+                .map(|tag| tag.id.clone())
+                .collect();
+            if !removes.is_empty() {
+                claims.push(Claim::TagRemove {
+                    nonce: mint_nonce(),
+                    ts,
+                    tag: path,
+                    removes,
+                });
             }
-            for existing in &current {
-                if tag_prefix(existing, &tag) {
-                    effective_del.push(existing.clone());
-                }
-            }
-            effective_add.push(tag.clone());
-            current.insert(tag);
         }
-        stable_dedup(&mut effective_del);
-        stable_dedup(&mut effective_add);
-        if effective_add.is_empty() && effective_del.is_empty() {
+        for path in normalized_paths(add) {
+            let supersedes: Vec<_> = doc
+                .tag_assertions
+                .iter()
+                .filter(|tag| tag.value == path || is_descendant(&tag.value, &path))
+                .map(|tag| tag.id.clone())
+                .collect();
+            claims.push(Claim::TagAdd {
+                nonce: mint_nonce(),
+                ts,
+                tag: path,
+                scope: None,
+                supersedes,
+            });
+        }
+        if claims.is_empty() {
             return Ok(doc.clone());
         }
-        self.append_and_load(
-            &doc.id,
-            &[Claim::Tag {
-                add: effective_add,
-                del: effective_del,
-                ts,
-            }],
-        )
+        self.append_and_load(&doc.id, &claims)
     }
+
     pub fn set_tag(&self, doc: &Document, key: &str, value: &str) -> Result<Document> {
         self.set_tag_at(doc, key, value, Utc::now())
     }
+
     pub fn set_tag_at(
         &self,
         doc: &Document,
@@ -155,34 +203,60 @@ impl Library {
     ) -> Result<Document> {
         let key = normalize_tag(key);
         let value = normalize_tag(value);
-        let tag = format!("{key}/{value}");
-        let del: Vec<_> = doc
-            .tags
-            .iter()
-            .filter(|existing| *existing == &key || tag_prefix(&key, existing))
-            .cloned()
-            .collect();
-        if del == [tag.clone()] {
-            return Ok(doc.clone());
+        if key.is_empty() || value.is_empty() {
+            return Err(Error::InvalidClaim(
+                "set needs a nonempty key and value".into(),
+            ));
         }
+        let tag = format!("{key}/{value}");
+        let supersedes = doc
+            .tag_assertions
+            .iter()
+            .filter(|assertion| assertion.value == key || is_descendant(&key, &assertion.value))
+            .map(|assertion| assertion.id.clone())
+            .collect();
         self.append_and_load(
             &doc.id,
-            &[Claim::Tag {
-                add: vec![tag],
-                del,
+            &[Claim::TagAdd {
+                nonce: mint_nonce(),
                 ts,
+                tag,
+                scope: Some(key),
+                supersedes,
             }],
         )
     }
+
     pub fn read(&self, doc: &Document) -> Result<Option<Vec<u8>>> {
         match doc.head() {
             Some(hash) => self.cas.get(hash),
-            None => Ok(None),
+            None if doc.heads.is_empty() => Ok(None),
+            None => Err(Error::AmbiguousHead {
+                id: doc.id.clone(),
+                heads: doc.heads.iter().map(|head| head.id.clone()).collect(),
+            }),
         }
     }
+
+    pub fn read_version(&self, doc: &Document, version_id: &str) -> Result<Option<Vec<u8>>> {
+        let matches: Vec<_> = doc
+            .versions
+            .iter()
+            .filter(|version| version.id.starts_with(version_id))
+            .collect();
+        if matches.len() != 1 {
+            return Err(Error::InvalidClaim(format!(
+                "version prefix {version_id} matches {} versions",
+                matches.len()
+            )));
+        }
+        self.cas.get(&matches[0].hash)
+    }
+
     pub fn documents(&self) -> Result<Vec<Document>> {
         Document::all(&self.root)
     }
+
     pub fn document(&self, prefix: &str) -> Result<Option<Document>> {
         if Log::new(&self.root, prefix).exists() {
             return Document::load(&self.root, prefix).map(Some);
@@ -202,11 +276,15 @@ impl Library {
     }
 }
 
-fn tag_prefix(prefix: &str, tag: &str) -> bool {
-    tag.starts_with(prefix) && tag.as_bytes().get(prefix.len()) == Some(&b'/')
+fn normalized_paths(paths: &[String]) -> BTreeSet<String> {
+    paths
+        .iter()
+        .map(|path| normalize_tag(path))
+        .filter(|path| !path.is_empty())
+        .collect()
 }
 
-fn stable_dedup(values: &mut Vec<String>) {
-    let mut seen = std::collections::HashSet::new();
-    values.retain(|value| seen.insert(value.clone()));
+fn is_descendant(prefix: &str, path: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|suffix| suffix.starts_with('/'))
 }

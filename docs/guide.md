@@ -5,7 +5,7 @@ every version, nothing overwritten. You find them again by describing them
 (what they are, what year, what you tagged them with) instead of remembering
 which folder you put them in.
 
-This guide walks through using it with real commands and their real output, and
+This guide walks through using it with commands and illustrative output, and
 ends with a look at what transfs writes to disk. For building it and a command
 reference, see the [README](../README.md). For why it is designed the way it
 is, see [architecture.md](architecture.md).
@@ -13,6 +13,9 @@ is, see [architecture.md](architecture.md).
 transfs is early software. It runs on one machine, from the command line, with a
 read-only view of the archive as folders. [Not built yet](#not-built-yet) lists
 what's missing.
+
+The Rust format starts at claim format 2. Crystal-era stores are unsupported;
+there are no existing user stores to migrate.
 
 ## How it differs from folders
 
@@ -54,7 +57,8 @@ your copy afterwards.
 `b88976cb1af5` is the start of the new document's id. Commands that act on one
 document take its id, and any start of it that's unique in your archive will
 do, so `b889` works too. (`head` identifies the file's contents; see
-[Under the hood](#under-the-hood).)
+[Under the hood](#under-the-hood). The `add` summary abbreviates the blob
+hash; `show` and `versions` identify the version claim separately.)
 
 The document's name defaults to the file's name. To give it a different one, add
 it after the file: `transfs add scan0042.pdf "lease.pdf"`.
@@ -65,15 +69,16 @@ After adding a few more files and tagging them (next section), `list` shows:
 
 ```
 $ transfs list
-b88976cb1af5  tax-return-2025.pdf       application/pdf   v1  owner/local,tag/finance,type/application/pdf,year/2025
-a4270f088d7f  receipt-laptop.pdf        application/pdf   v1  owner/local,tag/finance,tag/warranty,type/application/pdf,year/2024
-173d4a043633  beach.png                 image/png         v1  owner/local,stars/4,tag/vacation,type/image/png,year/2024
-9c44465cc681  sunset.png                image/png         v1  owner/local,stars/3,tag/vacation,type/image/png,year/2024
-2ea429b8634e  notes.md                  text/plain        v1  owner/local,tag/garden,type/text/plain
+b88976cb1af5  tax-return-2025.pdf       application/pdf   v1 heads=1  owner/local,tag/finance,type/application/pdf,year/2025
+a4270f088d7f  receipt-laptop.pdf        application/pdf   v1 heads=1  owner/local,tag/finance,tag/warranty,type/application/pdf,year/2024
+173d4a043633  beach.png                 image/png         v1 heads=1  owner/local,stars/4,tag/vacation,type/image/png,year/2024
+9c44465cc681  sunset.png                image/png         v1 heads=1  owner/local,stars/3,tag/vacation,type/image/png,year/2024
+2ea429b8634e  notes.md                  text/plain        v1 heads=1  owner/local,tag/garden,type/text/plain
 ```
 
-The columns are the id, the name, the type, the number of versions, and
-everything you can search on.
+The columns are the id, the name, the type, the number of versions, the number
+of current content heads, and everything you can search on. Here `v1` means
+one content version, not claim format 1.
 
 - **The type comes from the file's contents**, not its name. A PDF named
   `notes.txt` is still `application/pdf`.
@@ -98,10 +103,10 @@ which project? Keys are what make the folder view useful.
 containing `=` looks like an option, so put `--` before the tags if you use it:
 `transfs tag b88976cb1af5 -- year=2025`.
 
-Values can go deeper, like `date/2024/04/30`. On one document, the more specific
-tag wins: tagging `date/1920/10/10` on a document that has `date/1920` leaves
-just `date/1920/10/10`, and tagging `date/1920` after that changes nothing,
-because the full date already says 1920.
+Values can go deeper, like `date/2024/04/30`. The visible facet uses the most
+specific tag on each lineage: `date/1920/10/10` implies `date/1920`.
+Concurrent assertions remain in the claim log even when the facet shows only
+the deeper path.
 
 ### A key with one value: `set`
 
@@ -144,10 +149,10 @@ tells them apart by adding the start of each id, as in `notes~4005.md` and
 ```
 $ transfs show b88976cb1af5
 id:        b88976cb1af506c5865a6ab1a918a8a48867bdb0a3d139aeb29ec6fcbd014927
-name:      taxes 2025.pdf
-created:   2026-10-02 00:32:56 UTC
+names:     taxes 2025.pdf
+created:   2026-10-02T00:32:56.701581260Z
 versions:  1
-head:      98fa12007f700510353853382f07030270f6d8bf43f84100fc847eec7438488a
+heads:     98fa12007f70
 tags:      finance, year/2025
 ```
 
@@ -165,12 +170,12 @@ tags:      finance, year/2025
 
 ```
 $ transfs find tag:finance
-b88976cb1af5  tax-return-2025.pdf       application/pdf   v1  owner/local,tag/finance,type/application/pdf,year/2025
-a4270f088d7f  receipt-laptop.pdf        application/pdf   v1  owner/local,tag/finance,tag/warranty,type/application/pdf,year/2024
+b88976cb1af5  tax-return-2025.pdf       application/pdf   v1 heads=1  owner/local,tag/finance,type/application/pdf,year/2025
+a4270f088d7f  receipt-laptop.pdf        application/pdf   v1 heads=1  owner/local,tag/finance,tag/warranty,type/application/pdf,year/2024
 
 $ transfs find type:image
-173d4a043633  beach.png                 image/png         v1  owner/local,stars/4,tag/vacation,type/image/png,year/2024
-9c44465cc681  sunset.png                image/png         v1  owner/local,stars/3,tag/vacation,type/image/png,year/2024
+173d4a043633  beach.png                 image/png         v1 heads=1  owner/local,stars/4,tag/vacation,type/image/png,year/2024
+9c44465cc681  sunset.png                image/png         v1 heads=1  owner/local,stars/3,tag/vacation,type/image/png,year/2024
 ```
 
 To combine conditions, such as vacation photos from 2024, use the folder view.
@@ -184,8 +189,8 @@ $ transfs addversion 2ea429b8634e notes-v2.md
 added version 27af67e011be to 2ea429b8634e (now v2)
 
 $ transfs versions 2ea429b8634e
-  v1  7ccada649807  parent=(root)  2026-10-02 00:32:56 UTC
-* v2  27af67e011be  parent=7ccada649807  2026-10-02 00:32:56 UTC
+  7ccada649807  blob=2bb80d537b1d  parents=(root)  2026-10-02T00:32:56.701581260Z
+* 27af67e011be  blob=7d3dc8e23a83  parents=7ccada649807  2026-10-02T00:33:10.792006856Z
 
 $ transfs cat 2ea429b8634e
 # Garden notes
@@ -194,9 +199,12 @@ Plant tomatoes in May.
 Basil next to them.
 ```
 
-`versions` lists them oldest first, with `*` on the current one. `parent` is the
-version each one was made from. `cat` prints the current version. Older versions
-stay in the archive, but there's no command yet to print one.
+`versions` shows each version ID, complete-content blob hash, and parent
+version IDs. `*` marks every current head. `cat` prints the content when there
+is one head; `cat ID VERSION_ID` reads a specified version, including an older
+one. Concurrent edits from one base create multiple heads, and plain `cat ID`
+then asks you to select one. `addversion ID FILE --parents ID,ID` creates a
+resolution version after inspecting both heads.
 
 ## Browse the archive as folders
 
@@ -279,6 +287,10 @@ Plant tomatoes in May.
 Basil next to them.
 ```
 
+When content has forked, the mount shows one file per head, such as
+`notes~a1b2c3d4.md` and `notes~e5f6a7b8.md`. Concurrent names show the
+document under each current label.
+
 The view is read-only. Saving into it fails, and that's deliberate: it couldn't
 know what name, tags or document the new file should have. Use the commands
 above to change the archive.
@@ -300,10 +312,10 @@ $ transfs add beach.png "beach copy.png"
 added e7ceed25288e  "beach copy.png"  (1 version, head cc9c6b0a76f4)
 
 $ transfs check
-ok: 6 documents, 6 blobs
+ok: 6 documents, 5 blobs
 ```
 
-Six documents but still six stored files (blobs): the copy shares the beach
+Six documents but still five stored files (blobs): the copy shares the beach
 photo's. Its `head`, `cc9c6b0a76f4`, is the same as the beach photo's.
 
 ## Check the archive
@@ -337,31 +349,23 @@ characters are a subfolder, to keep any one folder from getting huge. A blob has
 no name, type or tags; it's just bytes.
 
 **Logs hold everything else.** Each document has one log, and transfs only ever
-adds lines to the end of it. Here is the notes document's log:
+adds lines to the end of it. This schematic shows the claim fields; the IDs and
+hashes below are abbreviated for readability:
 
+```text
+create(format=2, nonce=..., ts=...)                      → document ID D
+v2_version(nonce=..., hash=blob-A, parents=[])          → version ID V1
+v2_name(nonce=..., name="notes.md", supersedes=[])     → name ID N1
+v2_tag_add(nonce=..., tag="garden", supersedes=[])     → tag ID T1
+v2_version(nonce=..., hash=blob-B, parents=[V1])       → version ID V2
 ```
-{"op":"create","nonce":"66d88f74d5907c6871a04f62af4695ee","ts":"2026-10-02T00:32:56.701581260Z"}
-{"op":"version","hash":"7ccada649807dd1385b6ecb6a8e5a3a53c425349f35a94aac59683cee20bc1ae","parent":null,"ts":"2026-10-02T00:32:56.701581260Z"}
-{"op":"name","name":"notes.md","ts":"2026-10-02T00:32:56.701581260Z"}
-{"op":"tag","add":["garden"],"ts":"2026-10-02T00:32:56.719058687Z"}
-{"op":"version","hash":"27af67e011be08fabe402f960deab26c6e2e2462a5d810af89fc4ed9629f1e7f","parent":"7ccada649807dd1385b6ecb6a8e5a3a53c425349f35a94aac59683cee20bc1ae","ts":"2026-10-02T00:32:56.792006856Z"}
-```
 
-Line by line:
-
-1. **create** — the document begins. Its id is the hash of this line, which is
-   why the id never changes, whatever happens to the document later.
-2. **version** — its contents are blob `7ccada64…`. The log records the blob's
-   hash, and the hash is the blob's filename, so this line is how the document
-   finds its bytes.
-3. **name** — it's called `notes.md`.
-4. **tag** — tagged `garden`.
-5. **version** — new contents, blob `27af67e0…`, made from `7ccada64…`.
-
-To work out a document's current state, transfs reads its log from the top: the
-last version is the current contents, the last name is the name, and the tags
-are whatever the tag lines added and didn't remove. Lines are never changed or
-deleted, so the whole history is always there.
+Each ID hashes the claim's validated canonical value, using merkle-champ's
+`Identify` encoding; it does not hash the JSON text. A version parent is a
+**version ID**, while `hash` identifies the complete file bytes. Reverting to
+identical bytes creates a new version ID. Transfs derives current names, tags,
+and content heads from the causal references, so claim order and timestamps do
+not silently choose a winner. Lines are never changed or deleted.
 
 **`index.db` is a search database** built from the logs, so that `list`, `find`
 and the folder view are fast. It holds nothing the logs don't. If it's deleted
@@ -370,7 +374,6 @@ or damaged, `transfs reindex` rebuilds it.
 ## Not built yet
 
 - **Deleting a document.** Nothing removes a document or its stored files yet.
-- **Printing an older version.**
 - **Editing.** A way to check a document out, edit it, and check it back in as a
   new version.
 - **Finding by description.** Typing something like
