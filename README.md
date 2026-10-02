@@ -48,8 +48,28 @@ cargo run -- --store demo/store mount demo/mnt
 The mount is read-only, matching the current Crystal implementation. It presents
 facets as directories; a lone `=` switches to matching documents. The FUSE API
 supports writes, but transfs has not defined the commit behavior for edits
-through a mount. A live mount has not been tested in this development environment
-because `/dev/fuse` is unavailable.
+through a mount. A live host smoke test on 2026-10-02 passed facet and document
+listing, content reads, filesystem statistics, and read-only rejection.
+
+To check a live mount on a host with `/dev/fuse`, run these `just` tasks. The
+example store stays under ignored `target/fuse-smoke/`.
+
+```sh
+just fuse-device
+just fuse-build
+just fuse-prepare
+just fuse-mount       # foreground; leave this terminal open
+```
+
+In a second terminal, from this repository:
+
+```sh
+just fuse-verify
+just fuse-unmount
+```
+
+`just --list` also shows the individual `fuse-list`, `fuse-read`, `fuse-stat`,
+and `fuse-readonly` checks.
 
 The store layout is:
 
