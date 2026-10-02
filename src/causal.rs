@@ -21,6 +21,7 @@ pub enum CausalClaim {
     },
     #[serde(rename = "v2_version")]
     Version {
+        doc: String,
         nonce: String,
         ts: DateTime<Utc>,
         hash: String,
@@ -28,6 +29,7 @@ pub enum CausalClaim {
     },
     #[serde(rename = "v2_name")]
     Name {
+        doc: String,
         nonce: String,
         ts: DateTime<Utc>,
         name: String,
@@ -35,6 +37,7 @@ pub enum CausalClaim {
     },
     #[serde(rename = "v2_tag_add")]
     TagAdd {
+        doc: String,
         nonce: String,
         ts: DateTime<Utc>,
         tag: String,
@@ -44,6 +47,7 @@ pub enum CausalClaim {
     },
     #[serde(rename = "v2_tag_remove")]
     TagRemove {
+        doc: String,
         nonce: String,
         ts: DateTime<Utc>,
         tag: String,
@@ -86,30 +90,35 @@ impl Identify for CanonicalClaim {
                 format_ts(*ts).identify(hasher);
             }
             CausalClaim::Version {
+                doc,
                 nonce,
                 ts,
                 hash,
                 parents,
             } => {
                 1_u64.identify(hasher);
+                identify_hash(doc, hasher);
                 identify_hex(nonce, hasher);
                 format_ts(*ts).identify(hasher);
                 identify_hash(hash, hasher);
                 identify_refs(parents, hasher);
             }
             CausalClaim::Name {
+                doc,
                 nonce,
                 ts,
                 name,
                 supersedes,
             } => {
                 2_u64.identify(hasher);
+                identify_hash(doc, hasher);
                 identify_hex(nonce, hasher);
                 format_ts(*ts).identify(hasher);
                 name.identify(hasher);
                 identify_refs(supersedes, hasher);
             }
             CausalClaim::TagAdd {
+                doc,
                 nonce,
                 ts,
                 tag,
@@ -117,6 +126,7 @@ impl Identify for CanonicalClaim {
                 supersedes,
             } => {
                 3_u64.identify(hasher);
+                identify_hash(doc, hasher);
                 identify_hex(nonce, hasher);
                 format_ts(*ts).identify(hasher);
                 tag.identify(hasher);
@@ -127,12 +137,14 @@ impl Identify for CanonicalClaim {
                 identify_refs(supersedes, hasher);
             }
             CausalClaim::TagRemove {
+                doc,
                 nonce,
                 ts,
                 tag,
                 removes,
             } => {
                 4_u64.identify(hasher);
+                identify_hash(doc, hasher);
                 identify_hex(nonce, hasher);
                 format_ts(*ts).identify(hasher);
                 tag.identify(hasher);
@@ -208,8 +220,8 @@ impl CausalState {
             .collect()
     }
 
-    /// A `set` asserts a single value for its key. Another surviving
-    /// assertion under that key means the set did not supersede it.
+    /// Two surviving `set` assertions for the same key did not supersede
+    /// each other and therefore represent unresolved set intentions.
     pub fn tag_conflict_keys(&self) -> BTreeSet<String> {
         self.tags
             .iter()
@@ -217,11 +229,26 @@ impl CausalState {
                 let key = assertion.scope.as_ref()?;
                 self.tags
                     .iter()
-                    .any(|other| {
-                        other.id != assertion.id
-                            && (other.value == *key || is_descendant(key, &other.value))
-                    })
+                    .any(|other| other.id != assertion.id && other.scope.as_ref() == Some(key))
                     .then(|| key.clone())
+            })
+            .collect()
+    }
+
+    /// A later ordinary `tag` can deliberately add a second value after a
+    /// `set`; this reports cardinality without claiming concurrency.
+    pub fn set_multi_value_keys(&self) -> BTreeSet<String> {
+        let paths = self.projected_tags();
+        self.tags
+            .iter()
+            .filter_map(|assertion| {
+                let key = assertion.scope.as_ref()?;
+                (paths
+                    .iter()
+                    .filter(|path| *path == key || is_descendant(key, path))
+                    .count()
+                    > 1)
+                .then(|| key.clone())
             })
             .collect()
     }
@@ -271,21 +298,25 @@ impl CausalClaim {
                 require_hex(nonce, 32, "nonce")?;
             }
             Self::Version {
+                doc,
                 nonce,
                 hash,
                 parents,
                 ..
             } => {
+                require_hex(doc, 64, "document ID")?;
                 require_hex(nonce, 32, "nonce")?;
                 require_hex(hash, 64, "content hash")?;
                 normalize_ids(parents)?;
             }
             Self::Name {
+                doc,
                 nonce,
                 name,
                 supersedes,
                 ..
             } => {
+                require_hex(doc, 64, "document ID")?;
                 require_hex(nonce, 32, "nonce")?;
                 if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
                     return Err(Error::InvalidClaim(
@@ -295,12 +326,14 @@ impl CausalClaim {
                 normalize_ids(supersedes)?;
             }
             Self::TagAdd {
+                doc,
                 nonce,
                 tag,
                 scope,
                 supersedes,
                 ..
             } => {
+                require_hex(doc, 64, "document ID")?;
                 require_hex(nonce, 32, "nonce")?;
                 *tag = normalized_tag(tag)?;
                 if let Some(key) = scope {
@@ -312,11 +345,13 @@ impl CausalClaim {
                 normalize_ids(supersedes)?;
             }
             Self::TagRemove {
+                doc,
                 nonce,
                 tag,
                 removes,
                 ..
             } => {
+                require_hex(doc, 64, "document ID")?;
                 require_hex(nonce, 32, "nonce")?;
                 *tag = normalized_tag(tag)?;
                 normalize_ids(removes)?;
@@ -336,6 +371,16 @@ impl CausalClaim {
             Self::Version { parents, .. } => parents,
             Self::Name { supersedes, .. } | Self::TagAdd { supersedes, .. } => supersedes,
             Self::TagRemove { removes, .. } => removes,
+        }
+    }
+
+    pub fn bound_doc(&self) -> Option<&str> {
+        match self {
+            Self::Create { .. } => None,
+            Self::Version { doc, .. }
+            | Self::Name { doc, .. }
+            | Self::TagAdd { doc, .. }
+            | Self::TagRemove { doc, .. } => Some(doc),
         }
     }
 }
@@ -375,6 +420,13 @@ impl CausalSet {
     }
 
     pub fn fold(&self) -> Result<CausalState> {
+        let mut document_ids = BTreeSet::new();
+        for (id, claim) in &self.claims {
+            document_ids.insert(claim.bound_doc().unwrap_or(id));
+        }
+        if document_ids.len() > 1 {
+            return Err(Error::InvalidClaim("claim set mixes document IDs".into()));
+        }
         let mut targets = BTreeSet::new();
         let mut dependents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         let mut remaining: BTreeMap<&str, usize> = BTreeMap::new();
@@ -518,6 +570,7 @@ mod tests {
 
     fn name(n: &str, supersedes: Vec<String>) -> CausalClaim {
         CausalClaim::Name {
+            doc: "d".repeat(64),
             nonce: n.into(),
             ts: Utc::now(),
             name: "label".into(),

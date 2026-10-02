@@ -26,7 +26,11 @@ const TTL: Duration = Duration::ZERO;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Node {
     Directory,
-    File { hash: String, size: u64 },
+    File {
+        hash: String,
+        size: u64,
+        modified: SystemTime,
+    },
 }
 
 /// Keeps the query grammar, disambiguation, and blob resolution outside FUSE.
@@ -59,6 +63,7 @@ impl MountView {
             Ok(Some(Node::File {
                 hash,
                 size: row.size.unwrap_or(0).max(0) as u64,
+                modified: row.heads[0].ts.into(),
             }))
         } else {
             Ok(Some(Node::Directory))
@@ -82,6 +87,7 @@ impl MountView {
                             Node::File {
                                 hash,
                                 size: row.size.unwrap_or(0).max(0) as u64,
+                                modified: row.heads[0].ts.into(),
                             },
                         )
                     })
@@ -141,20 +147,7 @@ pub fn leaves(rows: Vec<Row>) -> Vec<(String, Row)> {
         } else {
             row.names.iter().cloned().collect()
         };
-        let heads = if row.heads.is_empty() {
-            row.head_hash
-                .as_ref()
-                .map(|hash| {
-                    vec![crate::index::HeadRow {
-                        id: row.id.clone(),
-                        hash: hash.clone(),
-                        size: row.size,
-                    }]
-                })
-                .unwrap_or_default()
-        } else {
-            row.heads.clone()
-        };
+        let heads = row.heads.clone();
         for name in names {
             for head in &heads {
                 let mut leaf = row.clone();
@@ -285,17 +278,19 @@ impl QueryFs {
             .map(str::to_owned)
     }
     fn attr(&self, ino: INodeNo, node: &Node) -> FileAttr {
-        let (kind, size, perm, nlink) = match node {
-            Node::Directory => (FileType::Directory, 0, 0o555, 2),
-            Node::File { size, .. } => (FileType::RegularFile, *size, 0o444, 1),
+        let (kind, size, perm, nlink, mtime) = match node {
+            Node::Directory => (FileType::Directory, 0, 0o555, 2, SystemTime::UNIX_EPOCH),
+            Node::File { size, modified, .. } => {
+                (FileType::RegularFile, *size, 0o444, 1, *modified)
+            }
         };
         FileAttr {
             ino,
             size,
             blocks: size.div_ceil(512),
             atime: SystemTime::UNIX_EPOCH,
-            mtime: SystemTime::UNIX_EPOCH,
-            ctime: SystemTime::UNIX_EPOCH,
+            mtime,
+            ctime: mtime,
             crtime: SystemTime::UNIX_EPOCH,
             kind,
             perm,

@@ -63,20 +63,25 @@ fn run() -> CliResult<i32> {
         "addversion" => {
             let doc = resolve(&lib, &required(&mut args, "addversion needs an id")?)?;
             let file = required(&mut args, "addversion needs a file")?;
-            let doc = if args.first().is_some_and(|a| a == "--parents") {
+            let (doc, version_id) = if args.first().is_some_and(|a| a == "--parents") {
                 args.remove(0);
                 let parents = required(&mut args, "--parents needs version IDs")?
                     .split(',')
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
-                lib.add_version_from_at(&doc, &parents, Path::new(&file), chrono::Utc::now())?
+                lib.add_version_from_at_with_id(
+                    &doc,
+                    &parents,
+                    Path::new(&file),
+                    chrono::Utc::now(),
+                )?
             } else {
-                lib.add_version(&doc, Path::new(&file))?
+                lib.add_version_with_id(&doc, Path::new(&file))?
             };
             update_index(&root, &doc)?;
             println!(
                 "added version {} to {} (now v{})",
-                doc.head_id().map(short).unwrap_or(""),
+                short(&version_id),
                 short(&doc.id),
                 doc.version_count()
             );
@@ -203,6 +208,15 @@ fn run() -> CliResult<i32> {
                 println!(
                     "tag conflicts: {}",
                     doc.tag_conflicts.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
+            if !doc.set_multi_value_keys.is_empty() {
+                println!(
+                    "set keys with multiple values: {}",
+                    doc.set_multi_value_keys
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
         }

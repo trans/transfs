@@ -1,8 +1,9 @@
 # Causal claim model: implementation plan
 
-> **Status:** the first local causal-claim gate is implemented in Rust. The
-> format 2 live FUSE smoke test passed on 2026-10-02; forked paths still need
-> a live mount test. Later storage/replication gates remain. This is the working
+> **Status:** the first local causal-claim gate is implemented in Rust. An
+> earlier format 2 build passed live FUSE checks, including content forks;
+> the document-bound revision needs a new host check. Later storage/replication
+> gates remain. This is the working
 > plan for the first gate of the [shared storage proposal](data_centric_architecture_architecture_whitepaper.md#6-validation-plan-for-pandora-and-transfs).
 > [Architecture](architecture.md) retains some historical design context;
 > [the guide](guide.md) describes the current user behavior.
@@ -26,7 +27,8 @@ heads, and presents each name/head pair in the FUSE mount.
    independently minted, otherwise identical edits have different IDs. New
    claim IDs use merkle-champ's `Identify` value encoding with a distinct
    transfs claim domain, type tag, and normalized causal-ID sets. The v2 create
-   claim's ID is the document ID. C0DATA remains a separate possible log
+   claim's ID is the document ID; every edit claim includes and hashes that ID.
+   C0DATA remains a separate possible log
    serialization; CHAMP and C0DATA are not competing structures.
 2. A content version has its own claim ID, a complete-content SHA-256 hash,
    and zero or more **parent version IDs**. Its identity is independent of the

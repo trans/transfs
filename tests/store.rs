@@ -38,6 +38,17 @@ fn document_fold_deduplicates_replayed_create_claim() {
 }
 
 #[test]
+fn edit_claim_cannot_be_replayed_into_another_document() {
+    let dir = TempDir::new().unwrap();
+    let lib = Library::new(dir.path().join("store"));
+    let file = source(&dir, "body", b"body");
+    let first = lib.add(&file, Some("First")).unwrap();
+    let second = lib.add(&file, Some("Second")).unwrap();
+    let stolen = Log::new(&lib.root, &first.id).read().unwrap().claims[1].clone();
+    assert!(Log::new(&lib.root, &second.id).append(&[stolen]).is_err());
+}
+
+#[test]
 fn stale_renames_remain_visible_until_explicit_resolution() {
     let dir = TempDir::new().unwrap();
     let lib = Library::new(dir.path().join("store"));
@@ -122,6 +133,19 @@ fn tags_keep_causal_assertions_but_project_leaves() {
     let resolved = lib.set_tag(&second, "genre", "blues").unwrap();
     assert_eq!(resolved.tag_conflicts.len(), 0);
     assert!(resolved.tags.contains("genre/blues"));
+}
+
+#[test]
+fn a_sequential_tag_after_set_is_multiple_values_without_a_conflict() {
+    let dir = TempDir::new().unwrap();
+    let lib = Library::new(dir.path().join("store"));
+    let file = source(&dir, "body", b"body");
+    let base = lib.add(&file, Some("Doc")).unwrap();
+    let set = lib.set_tag(&base, "stars", "5").unwrap();
+    let later = lib.tag(&set, &["stars/4".into()], &[]).unwrap();
+    assert!(later.tag_conflicts.is_empty());
+    assert!(later.set_multi_value_keys.contains("stars"));
+    assert!(check(&lib.root).unwrap().warnings.is_empty());
 }
 
 #[test]
@@ -232,9 +256,13 @@ fn index_and_mount_view_expose_every_name_and_head() {
             view.resolve(&format!("/=/{}", name)).unwrap(),
             Some(node.clone())
         );
-        let Node::File { hash, .. } = node else {
+        let Node::File { hash, modified, .. } = node else {
             panic!("expected file")
         };
+        assert!(row
+            .heads
+            .iter()
+            .any(|head| std::time::SystemTime::from(head.ts) == modified));
         assert!([b"B\n".to_vec(), b"C\n".to_vec()].contains(&view.read(&hash, 0, 2).unwrap()));
     }
     fs::remove_file(Index::db_path(&lib.root)).unwrap();
@@ -322,6 +350,7 @@ fn mount_leaf_suffixes_grow_when_short_ids_collide() {
                 id: (*head).into(),
                 hash: "a".repeat(64),
                 size: Some(1),
+                ts: Utc::now(),
             })
             .collect(),
         tags: vec![],
@@ -388,4 +417,25 @@ fn cli_requires_a_version_for_forked_content() {
     );
     let listing = String::from_utf8(run(&["list"]).stdout).unwrap();
     assert!(listing.contains("heads=2"));
+    let warnings = check(&lib.root).unwrap().warnings;
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].message.contains("2 content heads"));
+    assert!(!warnings[0].message.contains("names"));
+    let added = run(&[
+        "addversion",
+        &fork.id,
+        b.to_str().unwrap(),
+        "--parents",
+        &base.head_id().unwrap()[..12],
+    ]);
+    assert!(added.status.success());
+    let new_doc = Document::load(&lib.root, &fork.id).unwrap();
+    let new_head = new_doc
+        .heads
+        .iter()
+        .find(|head| !fork.heads.iter().any(|old| old.id == head.id))
+        .unwrap();
+    assert!(String::from_utf8(added.stdout)
+        .unwrap()
+        .contains(&format!("added version {}", &new_head.id[..12])));
 }

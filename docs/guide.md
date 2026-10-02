@@ -14,7 +14,8 @@ transfs is early software. It runs on one machine, from the command line, with a
 read-only view of the archive as folders. [Not built yet](#not-built-yet) lists
 what's missing.
 
-The Rust format starts at claim format 2. Crystal-era stores are unsupported;
+The Rust format starts at claim format 2. Edit claims are bound to their
+document ID. Crystal-era stores are unsupported;
 there are no existing user stores to migrate.
 
 ## How it differs from folders
@@ -354,10 +355,10 @@ hashes below are abbreviated for readability:
 
 ```text
 create(format=2, nonce=..., ts=...)                      → document ID D
-v2_version(nonce=..., hash=blob-A, parents=[])          → version ID V1
-v2_name(nonce=..., name="notes.md", supersedes=[])     → name ID N1
-v2_tag_add(nonce=..., tag="garden", supersedes=[])     → tag ID T1
-v2_version(nonce=..., hash=blob-B, parents=[V1])       → version ID V2
+v2_version(doc=D, nonce=..., hash=blob-A, parents=[])          → version ID V1
+v2_name(doc=D, nonce=..., name="notes.md", supersedes=[])     → name ID N1
+v2_tag_add(doc=D, nonce=..., tag="garden", supersedes=[])     → tag ID T1
+v2_version(doc=D, nonce=..., hash=blob-B, parents=[V1])       → version ID V2
 ```
 
 Each ID hashes the claim's validated canonical value, using merkle-champ's

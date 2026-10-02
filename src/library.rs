@@ -52,12 +52,14 @@ impl Library {
             &[
                 create,
                 Claim::Version {
+                    doc: id.clone(),
                     nonce: mint_nonce(),
                     ts,
                     hash,
                     parents: vec![],
                 },
                 Claim::Name {
+                    doc: id.clone(),
                     nonce: mint_nonce(),
                     ts,
                     name: label,
@@ -77,11 +79,25 @@ impl Library {
         path: &Path,
         ts: DateTime<Utc>,
     ) -> Result<Document> {
+        self.add_version_at_with_id(doc, path, ts)
+            .map(|(document, _)| document)
+    }
+
+    pub fn add_version_with_id(&self, doc: &Document, path: &Path) -> Result<(Document, String)> {
+        self.add_version_at_with_id(doc, path, Utc::now())
+    }
+
+    pub fn add_version_at_with_id(
+        &self,
+        doc: &Document,
+        path: &Path,
+        ts: DateTime<Utc>,
+    ) -> Result<(Document, String)> {
         let base = doc.head_id().ok_or_else(|| Error::AmbiguousHead {
             id: doc.id.clone(),
             heads: doc.heads.iter().map(|head| head.id.clone()).collect(),
         })?;
-        self.add_version_from_at(doc, &[base.to_owned()], path, ts)
+        self.add_version_from_at_with_id(doc, &[base.to_owned()], path, ts)
     }
 
     /// Explicit parents allow a conflict resolution version to join all heads.
@@ -93,6 +109,17 @@ impl Library {
         path: &Path,
         ts: DateTime<Utc>,
     ) -> Result<Document> {
+        self.add_version_from_at_with_id(doc, parents, path, ts)
+            .map(|(document, _)| document)
+    }
+
+    pub fn add_version_from_at_with_id(
+        &self,
+        doc: &Document,
+        parents: &[String],
+        path: &Path,
+        ts: DateTime<Utc>,
+    ) -> Result<(Document, String)> {
         if parents.is_empty() {
             return Err(Error::InvalidClaim(
                 "version needs an observed parent".into(),
@@ -114,15 +141,16 @@ impl Library {
             resolved.push(matches[0].id.clone());
         }
         let hash = self.cas.put(&fs::read(path)?)?;
-        self.append_and_load(
-            &doc.id,
-            &[Claim::Version {
-                nonce: mint_nonce(),
-                ts,
-                hash,
-                parents: resolved,
-            }],
-        )
+        let claim = Claim::Version {
+            doc: doc.id.clone(),
+            nonce: mint_nonce(),
+            ts,
+            hash,
+            parents: resolved,
+        };
+        let id = claim.id()?;
+        let document = self.append_and_load(&doc.id, &[claim])?;
+        Ok((document, id))
     }
 
     pub fn rename(&self, doc: &Document, name: &str) -> Result<Document> {
@@ -133,6 +161,7 @@ impl Library {
         self.append_and_load(
             &doc.id,
             &[Claim::Name {
+                doc: doc.id.clone(),
                 nonce: mint_nonce(),
                 ts,
                 name: name.into(),
@@ -162,6 +191,7 @@ impl Library {
                 .collect();
             if !removes.is_empty() {
                 claims.push(Claim::TagRemove {
+                    doc: doc.id.clone(),
                     nonce: mint_nonce(),
                     ts,
                     tag: path,
@@ -177,6 +207,7 @@ impl Library {
                 .map(|tag| tag.id.clone())
                 .collect();
             claims.push(Claim::TagAdd {
+                doc: doc.id.clone(),
                 nonce: mint_nonce(),
                 ts,
                 tag: path,
@@ -218,6 +249,7 @@ impl Library {
         self.append_and_load(
             &doc.id,
             &[Claim::TagAdd {
+                doc: doc.id.clone(),
                 nonce: mint_nonce(),
                 ts,
                 tag,

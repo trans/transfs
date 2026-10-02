@@ -6,6 +6,7 @@ use crate::{
     log::{Log, TornTail},
     Error, Result,
 };
+use chrono::{DateTime, Utc};
 use rusqlite::{params, params_from_iter, Connection, Params};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -89,6 +90,7 @@ pub struct HeadRow {
     pub id: String,
     pub hash: String,
     pub size: Option<i64>,
+    pub ts: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,7 +132,7 @@ impl Index {
             rebuild_warnings: vec![],
         };
         this.ensure_schema()?;
-        if !existed || schema_version < 3 {
+        if !existed || schema_version < 4 {
             this.rebuild()?;
             if !this.rebuild_errors.is_empty() {
                 return Err(Error::InvalidClaim(format!(
@@ -138,7 +140,7 @@ impl Index {
                     this.rebuild_errors.join("; ")
                 )));
             }
-            this.conn.execute_batch("PRAGMA user_version=3")?;
+            this.conn.execute_batch("PRAGMA user_version=4")?;
         }
         Ok(this)
     }
@@ -146,7 +148,7 @@ impl Index {
         let version: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < 3 {
+        if version < 4 {
             self.conn.execute_batch(
                 "DROP TABLE IF EXISTS documents;
                 DROP TABLE IF EXISTS versions; DROP TABLE IF EXISTS doc_names;
@@ -171,7 +173,7 @@ impl Index {
                 PRIMARY KEY(doc_id,id));
             CREATE TABLE IF NOT EXISTS doc_heads (
                 doc_id TEXT NOT NULL, id TEXT NOT NULL, hash TEXT NOT NULL,
-                size INTEGER, type TEXT, PRIMARY KEY(doc_id,id));
+                size INTEGER, type TEXT, ts TEXT NOT NULL, PRIMARY KEY(doc_id,id));
             CREATE TABLE IF NOT EXISTS doc_tags (
                 doc_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY(doc_id,path));
             CREATE TABLE IF NOT EXISTS membership (
@@ -286,13 +288,24 @@ impl Index {
     fn heads_for(&self, id: &str) -> Result<Vec<HeadRow>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id,hash,size FROM doc_heads WHERE doc_id=? ORDER BY id")?;
+            .prepare("SELECT id,hash,size,ts FROM doc_heads WHERE doc_id=? ORDER BY id")?;
         let heads = stmt
             .query_map([id], |r| {
+                let ts: String = r.get(3)?;
+                let ts = DateTime::parse_from_rfc3339(&ts)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?
+                    .with_timezone(&Utc);
                 Ok(HeadRow {
                     id: r.get(0)?,
                     hash: r.get(1)?,
                     size: r.get(2)?,
+                    ts,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -506,13 +519,14 @@ fn upsert(conn: &Connection, cas: &Cas, magic: &Magic, doc: &Document) -> Result
     }
     for head in &doc.heads {
         conn.execute(
-            "INSERT INTO doc_heads (doc_id,id,hash,size,type) VALUES (?,?,?,?,?)",
+            "INSERT INTO doc_heads (doc_id,id,hash,size,type,ts) VALUES (?,?,?,?,?,?)",
             params![
                 doc.id,
                 head.id,
                 head.hash,
                 blob_size(cas, &head.hash),
-                type_for(cas, magic, &head.hash)
+                type_for(cas, magic, &head.hash),
+                format_ts(head.ts)
             ],
         )?;
     }

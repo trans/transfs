@@ -10,12 +10,16 @@ fn ts(hour: u32) -> chrono::DateTime<Utc> {
 fn nonce(n: u128) -> String {
     format!("{n:032x}")
 }
+fn doc() -> String {
+    "d".repeat(64)
+}
 fn hash(byte: char) -> String {
     byte.to_string().repeat(64)
 }
 
 fn name(n: u128, value: &str, supersedes: Vec<String>) -> C {
     C::Name {
+        doc: doc(),
         nonce: nonce(n),
         ts: ts(3),
         name: value.into(),
@@ -25,6 +29,7 @@ fn name(n: u128, value: &str, supersedes: Vec<String>) -> C {
 
 fn version(n: u128, byte: char, parents: Vec<String>) -> C {
     C::Version {
+        doc: doc(),
         nonce: nonce(n),
         ts: ts(3),
         hash: hash(byte),
@@ -34,6 +39,7 @@ fn version(n: u128, byte: char, parents: Vec<String>) -> C {
 
 fn tag(n: u128, path: &str, scope: Option<&str>, supersedes: Vec<String>) -> C {
     C::TagAdd {
+        doc: doc(),
         nonce: nonce(n),
         ts: ts(3),
         tag: path.into(),
@@ -49,12 +55,21 @@ fn identity_is_stable_and_user_delimiters_do_not_alias() {
     assert_ne!(base.id().unwrap(), other.id().unwrap());
     assert_eq!(
         base.id().unwrap(),
-        "d6c1e316c4d72c90f3696ae8d1d9347ccde20e8570911931c82c2854f566f7d3"
+        "8419519b28dae7570198b33c375e66fcd63d5e4339c105f45a9d0a361dd02825"
     );
     assert_eq!(
         C::from_json_line(&base.to_json_line().unwrap()).unwrap(),
         base
     );
+    let mut another_doc = base.clone();
+    if let C::Name { doc, .. } = &mut another_doc {
+        *doc = "e".repeat(64);
+    }
+    assert_ne!(base.id().unwrap(), another_doc.id().unwrap());
+    assert!(CausalSet::from_claims([base.clone(), another_doc])
+        .unwrap()
+        .fold()
+        .is_err());
     let mut champ_hasher = Sha256::new();
     CanonicalClaim::new(base.clone())
         .unwrap()
@@ -71,7 +86,7 @@ fn identity_is_stable_and_user_delimiters_do_not_alias() {
     );
     assert_eq!(
         version(7, 'a', vec![]).id().unwrap(),
-        "91af52793f4038eaa1c2ef8b04ad9d3ba8fd6858be25d7e4a71148f7c7cabf9d"
+        "ea8baa5fd1da6aa57f2a4cd58290f3bd6a907bd3f5eb6da7e044f96c673a72c9"
     );
     assert_eq!(create.doc_id(), Some(create.id().unwrap()));
     assert_eq!(
@@ -79,6 +94,7 @@ fn identity_is_stable_and_user_delimiters_do_not_alias() {
         create
     );
     assert!(C::from_json_line(r#"{"op":"create","format":1,"nonce":"0000000000000000000000000000002a","ts":"2026-01-02T03:04:05Z"}"#).is_err());
+    assert!(C::from_json_line(r#"{"op":"v2_name","nonce":"00000000000000000000000000000001","ts":"2026-01-02T03:04:05Z","name":"x","supersedes":[]}"#).is_err());
 
     let t1 = tag(3, "genre=jazz", None, vec![]);
     let t2 = tag(3, "genre/jazz", None, vec![]);
@@ -141,6 +157,7 @@ fn tag_remove_and_concurrent_set_use_observed_ids() {
     let rock = tag(1, "genre/rock", None, vec![]);
     let jazz = tag(2, "genre/jazz", None, vec![]);
     let remove_rock = C::TagRemove {
+        doc: doc(),
         nonce: nonce(3),
         ts: ts(3),
         tag: "genre/rock".into(),
@@ -185,6 +202,7 @@ fn concurrent_add_survives_remove_of_only_the_observed_assertion() {
     let old = tag(1, "genre/jazz", None, vec![]);
     let replacement = tag(2, "genre/jazz", None, vec![old.id().unwrap()]);
     let removal = C::TagRemove {
+        doc: doc(),
         nonce: nonce(3),
         ts: ts(3),
         tag: "genre/jazz".into(),

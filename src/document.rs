@@ -22,6 +22,7 @@ pub struct Document {
     pub tags: BTreeSet<String>,
     pub tag_assertions: Vec<TagValue>,
     pub tag_conflicts: BTreeSet<String>,
+    pub set_multi_value_keys: BTreeSet<String>,
 }
 
 impl Document {
@@ -46,6 +47,14 @@ impl Document {
         if !matches!(claims.first(), Some(Claim::Create { .. })) {
             return Err(Error::InvalidClaim("first claim must be create".into()));
         }
+        if claims
+            .iter()
+            .any(|claim| claim.bound_doc().is_some_and(|bound| bound != id))
+        {
+            return Err(Error::InvalidClaim(format!(
+                "claim belongs to another document, expected {id}"
+            )));
+        }
         let set = CausalSet::from_claims(claims.iter().cloned())?;
         let mut creates = Vec::new();
         for claim in set.claims().values() {
@@ -62,6 +71,7 @@ impl Document {
         let name = (state.names.len() == 1).then(|| state.names[0].value.clone());
         let tags = state.projected_tags();
         let tag_conflicts = state.tag_conflict_keys();
+        let set_multi_value_keys = state.set_multi_value_keys();
         Ok(Self {
             id,
             name,
@@ -72,6 +82,7 @@ impl Document {
             tags,
             tag_assertions: state.tags,
             tag_conflicts,
+            set_multi_value_keys,
         })
     }
 

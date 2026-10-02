@@ -69,15 +69,25 @@ pub fn check(root: &Path) -> Result<CheckResult> {
                     });
                 }
                 match Document::fold(&id, &read.claims) {
-                    Ok(doc) if doc.has_conflicts() => result.warnings.push(Issue {
-                        path: path.clone(),
-                        message: format!(
-                            "unresolved claims: {} names, {} content heads, tag keys {:?}",
-                            doc.names.len(),
-                            doc.heads.len(),
-                            doc.tag_conflicts
-                        ),
-                    }),
+                    Ok(doc) if doc.has_conflicts() => {
+                        let mut unresolved = Vec::new();
+                        if doc.names.len() > 1 {
+                            unresolved.push(format!("{} names", doc.names.len()));
+                        }
+                        if doc.heads.len() > 1 {
+                            unresolved.push(format!("{} content heads", doc.heads.len()));
+                        }
+                        if !doc.tag_conflicts.is_empty() {
+                            unresolved.push(format!(
+                                "competing set keys {}",
+                                doc.tag_conflicts.into_iter().collect::<Vec<_>>().join(", ")
+                            ));
+                        }
+                        result.warnings.push(Issue {
+                            path: path.clone(),
+                            message: format!("unresolved claims: {}", unresolved.join(", ")),
+                        });
+                    }
                     Ok(_) => {}
                     Err(e) => result.errors.push(Issue {
                         path: path.clone(),
