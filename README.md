@@ -92,3 +92,5 @@ carried over from the Crystal project. Some design and proposal sections still
 refer to that implementation; the Rust source in `src/` is the current code.
 The [data-centric architecture whitepaper](docs/data_centric_architecture_architecture_whitepaper.md)
 proposes a shared Pandora/transfs storage engine and a plan to test it.
+The [causal claim model plan](docs/claim-model-plan.md) breaks the first
+implementation gate into concrete changes and checks.

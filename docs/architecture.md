@@ -4,6 +4,8 @@
 > transfs's storage model, claims, index, mount, and CLI. The
 > [user guide](guide.md) describes what works today; the
 > [substrate proposal](proposal-substrate.md) explores a possible next design.
+> The [causal claim model plan](claim-model-plan.md) supersedes this document's
+> timestamp-ordered claims and blob-hash version parents for upcoming Rust work.
 >
 > Note: this hand-written design doc lives at `docs/architecture.md` and is
 > tracked. If you later run `crystal docs`, send generated API HTML to a

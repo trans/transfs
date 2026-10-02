@@ -258,6 +258,10 @@ and leaves the storage savings to be measured on the remaining workload.
 
 ## 6. Validation Plan for Pandora and transfs
 
+The [causal claim model plan](claim-model-plan.md) details the first gate for
+the Rust repository, including legacy-log compatibility and read behavior at
+unresolved forks.
+
 The first implementation changes the claim model in Rust, while no real
 transfs stores need migration. It needs no R2 bucket or object-store mock.
 Work through these gates in order:
