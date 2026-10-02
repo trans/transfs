@@ -1,0 +1,6 @@
+/target/
+/demo/store/
+/demo/mnt/
+/test/
+**/.transfs/index.db
+/docs/api/

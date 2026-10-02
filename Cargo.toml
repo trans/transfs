@@ -1,0 +1,32 @@
+[package]
+name = "transfs"
+version = "0.1.1"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "transfs"
+path = "src/main.rs"
+required-features = ["native"]
+
+[features]
+default = ["native"]
+native = ["dep:rusqlite", "dep:fuser", "dep:libc"]
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
+hex = "0.4.3"
+rand = "0.8.8"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+thiserror = "1.0.69"
+rusqlite = { version = "0.32.1", optional = true }
+fuser = { version = "0.18.0", features = ["libfuse3"], optional = true }
+libc = { version = "0.2.177", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2.17", features = ["js"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"
