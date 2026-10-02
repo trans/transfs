@@ -1,10 +1,10 @@
-# transfs-rs
+# transfs
 
 transfs is an experimental content-addressed file archive. It stores file
 bytes once by SHA-256 and keeps each document's name, tags, and version history
 in an append-only claim log. SQLite is a rebuildable index, not the source of
 truth. This Rust implementation can read stores written by the original
-[Crystal transfs](https://github.com/trans/transfs), and Crystal can read its
+[Crystal transfs](https://github.com/trans/transfs.cr), and Crystal can read its
 stores.
 
 The library provides claims, the blob store, log replay, document mutations,
@@ -90,3 +90,5 @@ cross-language store compatibility checks.
 the [user guide](docs/guide.md) walks through the CLI. These documents were
 carried over from the Crystal project. Some design and proposal sections still
 refer to that implementation; the Rust source in `src/` is the current code.
+The [data-centric architecture whitepaper](docs/data_centric_architecture_architecture_whitepaper.md)
+proposes a shared Pandora/transfs storage engine and a plan to test it.
