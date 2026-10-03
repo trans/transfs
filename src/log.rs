@@ -1,9 +1,29 @@
-use crate::{claim::Claim, Error, Result};
+use crate::{cas::sync_dir, claim::Claim, Error, Result};
 use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
 };
+
+/// Serializes local claim appends and checkpoint capture across processes.
+pub(crate) struct StoreLock {
+    _file: fs::File,
+}
+
+impl StoreLock {
+    pub(crate) fn acquire(root: &Path) -> Result<Self> {
+        let dir = root.join(".transfs");
+        fs::create_dir_all(&dir)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join("lock"))?;
+        file.lock()?;
+        Ok(Self { _file: file })
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct TornTail {
@@ -43,6 +63,7 @@ impl Log {
         self.path().exists()
     }
     pub fn append(&self, claims: &[Claim]) -> Result<()> {
+        let _lock = StoreLock::acquire(&self.root)?;
         let path = self.path();
         let mut combined = if path.exists() {
             let existing = self.read()?;
@@ -72,14 +93,22 @@ impl Log {
             bytes.extend_from_slice(claim.to_json_line()?.as_bytes());
             bytes.push(b'\n');
         }
-        fs::create_dir_all(path.parent().expect("log path has parent"))?;
+        let new_log = !path.exists();
+        let dir = path.parent().expect("log path has parent");
+        fs::create_dir_all(dir)?;
         let mut file = fs::OpenOptions::new()
             .append(true)
             .create(true)
-            .open(path)?;
+            .open(&path)?;
         file.write_all(&bytes)?;
         file.flush()?;
         file.sync_all()?;
+        if new_log {
+            sync_dir(&self.root)?;
+            sync_dir(&self.root.join(".transfs"))?;
+            sync_dir(&Self::docs_dir(&self.root))?;
+            sync_dir(dir)?;
+        }
         Ok(())
     }
     pub fn read(&self) -> Result<ReadResult> {

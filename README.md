@@ -18,7 +18,7 @@ The native build requires SQLite, `libmagic`, and FUSE 3 development libraries.
 To run the mount, the machine also needs `/dev/fuse` access.
 
 ```sh
-cargo test
+cargo test --workspace
 cargo test --no-default-features
 cargo build --bin transfs
 ```
@@ -80,6 +80,25 @@ The store layout is:
 
 The database is disposable. Delete it or run `transfs reindex` to rebuild it
 from the claim logs.
+
+## Directory remote checkpoint
+
+Publish a checkpoint under a stable writer ID, then recover it into a new
+working store on another device:
+
+```sh
+transfs --store laptop/store publish /mnt/transfs-remote laptop
+transfs --store restored/store recover /mnt/transfs-remote
+transfs --store restored/store check
+```
+
+The recovery target must not exist. A remote stores immutable blobs and CHAMP
+packs plus append-only writer refs; it does not contain the live claim logs or
+SQLite database. Recovery unions all published writer roots and rebuilds the
+index. `publish` and `recover` are the first cold-recovery commands, not yet an
+incremental sync into an existing working store. See the
+[directory remote format](docs/storage-protocol.md) for its layout and current
+limits.
 
 ## Design notes
 

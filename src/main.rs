@@ -11,6 +11,8 @@ use transfs::{
     index::{Index, Row},
     library::Library,
     mount,
+    remote::DirectoryRemote,
+    replica,
 };
 
 type CliResult<T> = Result<T, Box<dyn Error>>;
@@ -41,7 +43,7 @@ fn run() -> CliResult<i32> {
         env::current_dir()?.join(root)
     };
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
-        println!("transfs [--store DIR] <command> [args]\n\ncommands: add addversion rename tag untag set list find reindex check cat show versions mount\n\naddversion ID FILE [--parents VERSION_ID,...]\ncat ID [VERSION_ID]");
+        println!("transfs [--store DIR] <command> [args]\n\ncommands: add addversion rename tag untag set list find reindex check cat show versions mount publish recover\n\naddversion ID FILE [--parents VERSION_ID,...]\ncat ID [VERSION_ID]\npublish REMOTE_DIR WRITER_ID\nrecover REMOTE_DIR  (into a store path that does not exist)");
         return Ok(0);
     }
     let command = args.remove(0);
@@ -257,6 +259,40 @@ fn run() -> CliResult<i32> {
                 return Err("mountpoint is not a directory".into());
             }
             mount::mount(&root, &mountpoint)?;
+        }
+        "publish" => {
+            let remote =
+                DirectoryRemote::new(required(&mut args, "publish needs a remote directory")?);
+            let writer = required(&mut args, "publish needs a writer ID")?;
+            let report = replica::publish(&lib, &remote, &writer)?;
+            if report.changed {
+                println!(
+                    "published {} sequence {} root {}",
+                    report.writer,
+                    report.sequence,
+                    short(&report.root)
+                );
+            } else {
+                println!("unchanged {} sequence {}", report.writer, report.sequence);
+            }
+        }
+        "recover" => {
+            let remote =
+                DirectoryRemote::new(required(&mut args, "recover needs a remote directory")?);
+            let report = replica::recover(&remote, &root)?;
+            let mut index = Index::open(&root)?;
+            index.rebuild()?;
+            if !index.rebuild_errors.is_empty() {
+                return Err(format!(
+                    "recovered store has index errors: {:?}",
+                    index.rebuild_errors
+                )
+                .into());
+            }
+            println!(
+                "recovered {} documents, {} blobs from {} writers",
+                report.documents, report.blobs, report.writers
+            );
         }
         _ => return Err(format!("unknown command: {command}").into()),
     }

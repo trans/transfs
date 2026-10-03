@@ -6,7 +6,10 @@ pub mod claim;
 pub mod document;
 pub mod library;
 pub mod log;
+pub mod pack;
 pub mod query;
+pub mod remote;
+pub mod replica;
 
 #[cfg(feature = "native")]
 pub mod index;
@@ -33,6 +36,8 @@ pub enum Error {
     AmbiguousHead { id: String, heads: Vec<String> },
     #[error("native library error: {0}")]
     Native(String),
+    #[error("storage error: {0}")]
+    Storage(String),
     #[cfg(feature = "native")]
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),

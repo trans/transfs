@@ -4,6 +4,10 @@ set tempdir := "/tmp"
 default:
     @just --list
 
+# Verify directory-remote publication, cold recovery, and competing refs.
+remote-verify:
+    cargo test --offline --test remote
+
 # Check that this shell can use the host FUSE device.
 fuse-device:
     #!/usr/bin/env bash

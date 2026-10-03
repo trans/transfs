@@ -372,10 +372,17 @@ dependencies = [
 
 [[package]]
 name = "merkle-champ"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cbdf1662e86b92d45dd9cd5df7cc7a70198b4d6fdd631078cd62b546732b77f"
+version = "0.2.0"
+source = "git+https://github.com/tabcomputing/merkle-champ?rev=37d2dcd48a32e4c6961f634b660b90cf2c8bc3f4#37d2dcd48a32e4c6961f634b660b90cf2c8bc3f4"
 dependencies = [
+ "sha2",
+]
+
+[[package]]
+name = "merkle-champ-pack"
+version = "0.1.0"
+dependencies = [
+ "merkle-champ",
  "sha2",
 ]
 
@@ -781,6 +788,7 @@ dependencies = [
  "hex",
  "libc",
  "merkle-champ",
+ "merkle-champ-pack",
  "rand",
  "rusqlite",
  "serde",

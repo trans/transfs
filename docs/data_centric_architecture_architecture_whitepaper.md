@@ -1,8 +1,10 @@
 # Decoupled Data-Centric Architecture
 
-> **Status: proposal, revised 2026-10-02.** The first local per-field causal
+> **Status: proposal, revised 2026-10-03.** The first local per-field causal
 > claim gate is implemented in Rust. Advisory edit announcements are planned.
-> The CHAMP-backed remote store, RRB file tree, and Spatial N-D Chunk Tree below
+> A first directory-remote checkpoint and cold-recovery slice is implemented;
+> [its provisional format](storage-protocol.md) still needs validation on NAS
+> and removable filesystems. The RRB file tree and Spatial N-D Chunk Tree below
 > are design candidates. The
 > [transfs architecture](architecture.md) describes the existing model, and the
 > [substrate proposal](proposal-substrate.md) describes its proposed cloud role.
@@ -372,12 +374,12 @@ Gate 1 is complete; work through the remaining gates in order:
    drop, all-writer observation, and authority retirement of a writer that
    never returns. A sole active writer can finalize its own drop immediately.
 
-Start the remote storage gate with a private working store syncing through a
-directory remote. Exercise crash-before-ref recovery, simultaneous ref
-publication, and recovery on a second device with an empty cache. A directory
-remote contains only portable remote objects and refs, not a shared copy of
-the live working store. Add the transfs service and R2 adapters against the
-same remote contract after that gate.
+The first directory-remote slice now publishes from a private working store,
+rejects competing ref creation, and recovers an empty second store with
+conflicting heads intact. A directory remote contains only portable remote
+objects and refs, not a shared copy of the live working store. Validate the
+format and filesystem operations on actual NAS and removable media, then add
+the transfs service and R2 adapters against the same remote contract.
 
 Correct causal state and recoverability are mandatory. The chunk measurement
 decides whether RRB work is justified now or should wait for a Pandora editor.

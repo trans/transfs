@@ -1,6 +1,6 @@
 //! Pure v2 claim identities, set union, and causal fold.
 use chrono::{DateTime, Utc};
-use merkle_champ::Identify;
+use merkle_champ::{Identify, Sink};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -77,10 +77,10 @@ impl CanonicalClaim {
 }
 
 impl Identify for CanonicalClaim {
-    fn identify(&self, hasher: &mut Sha256) {
+    fn identify<S: Sink + ?Sized>(&self, hasher: &mut S) {
         // 'C' is reserved for this claim value type; all fields after it use
         // merkle-champ FORMAT.md v1 Identify encodings.
-        hasher.update([b'C']);
+        hasher.update(b"C");
         "transfs/claim/v2".identify(hasher);
         match &self.0 {
             CausalClaim::Create { format, nonce, ts } => {
@@ -154,11 +154,11 @@ impl Identify for CanonicalClaim {
     }
 }
 
-fn identify_hex(value: &str, hasher: &mut Sha256) {
+fn identify_hex<S: Sink + ?Sized>(value: &str, hasher: &mut S) {
     hex::decode(value).expect("validated hex").identify(hasher);
 }
 
-fn identify_hash(value: &str, hasher: &mut Sha256) {
+fn identify_hash<S: Sink + ?Sized>(value: &str, hasher: &mut S) {
     let bytes: [u8; 32] = hex::decode(value)
         .expect("validated hash")
         .try_into()
@@ -166,7 +166,7 @@ fn identify_hash(value: &str, hasher: &mut Sha256) {
     bytes.identify(hasher);
 }
 
-fn identify_refs(refs: &[String], hasher: &mut Sha256) {
+fn identify_refs<S: Sink + ?Sized>(refs: &[String], hasher: &mut S) {
     (refs.len() as u64).identify(hasher);
     for reference in refs {
         identify_hash(reference, hasher);
