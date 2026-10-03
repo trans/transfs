@@ -235,6 +235,33 @@ fn concurrent_ancestor_and_descendant_tags_project_to_the_leaf() {
 }
 
 #[test]
+fn nested_sets_conflict_only_when_their_values_diverge() {
+    let conflicting = CausalSet::from_claims([
+        tag(1, "date/1921", Some("date"), vec![]),
+        tag(2, "date/1920/10", Some("date/1920"), vec![]),
+    ])
+    .unwrap()
+    .fold()
+    .unwrap();
+    assert_eq!(
+        conflicting
+            .tag_conflict_keys()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        ["date"]
+    );
+
+    let compatible = CausalSet::from_claims([
+        tag(3, "date/1920", Some("date"), vec![]),
+        tag(4, "date/1920/10", Some("date/1920"), vec![]),
+    ])
+    .unwrap()
+    .fold()
+    .unwrap();
+    assert!(compatible.tag_conflict_keys().is_empty());
+}
+
+#[test]
 fn duplicate_delivery_and_clock_skew_do_not_change_frontiers() {
     let initial = name(1, "before", vec![]);
     let mut later = name(2, "after", vec![initial.id().unwrap()]);

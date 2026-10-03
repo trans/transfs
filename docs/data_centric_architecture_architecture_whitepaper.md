@@ -286,6 +286,16 @@ Work through these gates in order:
    regions even when PNG/WebP re-encodes do not. This measurement changes no
    live files. [Restic's design](https://github.com/restic/restic/blob/master/doc/design.rst)
    illustrates content-defined file chunks.
+   Include consistent snapshots of sample SQLite databases: compare fixed
+   page-aligned chunks (using the database's page size) with FastCDC
+   content-defined chunks
+   chunks after small row updates, a bulk insert, and `VACUUM`. Create the
+   baseline and ordinary-update snapshots with SQLite's online backup API,
+   which preserves the source's page layout. Run `VACUUM` only on a disposable
+   copy as a separate repacking case; `VACUUM INTO` also repacks pages and must
+   not be used for the ordinary-update snapshots. Never chunk a live database
+   mid-transaction. Report page sharing separately from image and audio
+   sharing, since SQLite's fixed page layout is a different workload.
 3. **Build the RRB prototype only if there is a workload for it.** If the
    measurement shows useful sharing, or a Pandora editor needs explicit
    splices, prototype variable-length byte chunks with range read, overwrite,

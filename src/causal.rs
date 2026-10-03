@@ -220,19 +220,41 @@ impl CausalState {
             .collect()
     }
 
-    /// Two surviving `set` assertions for the same key did not supersede
-    /// each other and therefore represent unresolved set intentions.
+    /// Surviving `set` assertions for the same key are unresolved. A set on a
+    /// nested key also conflicts with an ancestor set when their values
+    /// diverge, but a more specific value on the same lineage is compatible.
     pub fn tag_conflict_keys(&self) -> BTreeSet<String> {
-        self.tags
-            .iter()
-            .filter_map(|assertion| {
-                let key = assertion.scope.as_ref()?;
-                self.tags
-                    .iter()
-                    .any(|other| other.id != assertion.id && other.scope.as_ref() == Some(key))
-                    .then(|| key.clone())
-            })
-            .collect()
+        let mut conflicts = BTreeSet::new();
+        for (index, assertion) in self.tags.iter().enumerate() {
+            let Some(key) = assertion.scope.as_ref() else {
+                continue;
+            };
+            for other in self.tags.iter().skip(index + 1) {
+                let Some(other_key) = other.scope.as_ref() else {
+                    continue;
+                };
+                if key == other_key {
+                    conflicts.insert(key.clone());
+                } else {
+                    let ancestor = if is_descendant(key, other_key) {
+                        Some(key)
+                    } else if is_descendant(other_key, key) {
+                        Some(other_key)
+                    } else {
+                        None
+                    };
+                    if let Some(ancestor) = ancestor {
+                        let values_diverge = assertion.value != other.value
+                            && !is_descendant(&assertion.value, &other.value)
+                            && !is_descendant(&other.value, &assertion.value);
+                        if values_diverge {
+                            conflicts.insert(ancestor.clone());
+                        }
+                    }
+                }
+            }
+        }
+        conflicts
     }
 
     /// A later ordinary `tag` can deliberately add a second value after a
