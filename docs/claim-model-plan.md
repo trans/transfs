@@ -1,9 +1,10 @@
 # Causal claim model: implementation plan
 
-> **Status:** the first local causal-claim gate is implemented in Rust. An
-> earlier format 2 build passed live FUSE checks, including content forks;
-> the document-bound revision needs a new host check. Later storage/replication
-> gates remain. This is the working
+> **Status:** the first local causal-claim gate is implemented and verified in
+> Rust. The document-bound format 2 build passed a live FUSE smoke test on
+> 2026-10-02, including two content heads and version modification time.
+> Concurrent name paths are covered by mount-view tests. Later storage and
+> replication gates remain. This is the working
 > plan for the first gate of the [shared storage proposal](data_centric_architecture_architecture_whitepaper.md#6-validation-plan-for-pandora-and-transfs).
 > [Architecture](architecture.md) retains some historical design context;
 > [the guide](guide.md) describes the current user behavior.

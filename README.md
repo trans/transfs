@@ -47,9 +47,10 @@ cargo run -- --store demo/store mount demo/mnt
 The mount is read-only. It presents
 facets as directories; a lone `=` switches to matching documents. The FUSE API
 supports writes, but transfs has not defined the commit behavior for edits
-through a mount. An earlier format 2 build passed live host checks for facet
-listing, content reads, statistics, read-only rejection, and forked content
-paths. The current document-bound claim revision still needs a host check.
+through a mount. The current document-bound format 2 build passed the live host
+smoke test on 2026-10-02: facet listing, ordinary and forked content reads,
+filesystem statistics, version modification time, and read-only rejection.
+Concurrent name paths are covered by mount-view tests.
 
 To check a live mount on a host with `/dev/fuse`, run these `just` tasks. The
 example store stays under ignored `target/fuse-smoke-v2-forks/`.
