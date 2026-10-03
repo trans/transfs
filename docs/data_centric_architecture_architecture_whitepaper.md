@@ -1,8 +1,8 @@
 # Decoupled Data-Centric Architecture
 
-> **Status: proposal, revised 2026-10-02.** Per-field causal claims and
-> advisory edit announcements are agreed directions but are not implemented.
-> The CHAMP-backed cloud store, RRB file tree, and Spatial N-D Chunk Tree below
+> **Status: proposal, revised 2026-10-02.** The first local per-field causal
+> claim gate is implemented in Rust. Advisory edit announcements are planned.
+> The CHAMP-backed remote store, RRB file tree, and Spatial N-D Chunk Tree below
 > are design candidates. The
 > [transfs architecture](architecture.md) describes the existing model, and the
 > [substrate proposal](proposal-substrate.md) describes its proposed cloud role.
@@ -16,8 +16,8 @@ vendor-specific APIs.
 This whitepaper proposes a **Data-Centric, Local-First Architecture** for
 Pandora and transfs. A **Merkle CHAMP (Compressed Hash-Array Mapped Trie)**
 indexes immutable causal claims, content versions, and typed roots;
-**Content-Addressable Storage (CAS)** holds their nodes and bytes locally and
-on Cloudflare R2. Structural
+**Content-Addressable Storage (CAS)** holds their nodes and bytes in each
+device's private working store and in portable remotes. Structural
 sharing makes snapshots cheap. Concurrent changes to different fields can
 coexist; competing changes to one field remain distinct until a field-specific
 merge rule or an explicit authority decision resolves them.
@@ -116,9 +116,10 @@ chunks, must not change the version-claim ID or complete-content hash. The new
 representation is written and verified before it is made discoverable; the old
 one remains reachable until safe garbage collection. The durable mapping from
 content hash to available representations is part of the storage design, not
-just a disposable local cache. One proposed layout uses `blobs/<sha256>` for a
-whole-file representation and write-once `reps/<sha256>/<rep-id>` records for
-others. Each record names an RRB root or delta base and patch. A reader can
+just a disposable local cache. One possible flat remote layout uses
+`blobs/<sha256>` for a whole-file representation and write-once
+`reps/<sha256>/<rep-id>` records for others; the exact blob-key fanout remains
+open. Each record names an RRB root or delta base and patch. A reader can
 discover records by prefix; writers can add a representation without changing
 any document claim or writer ref. Before publishing a record, its writer
 reconstructs and hashes the complete bytes. The record carries verification
@@ -177,7 +178,7 @@ this rule even when devices were offline or began editing simultaneously.
 ### Checkpoints, Compaction, and Offline Peers
 
 Three operations must remain distinct: checkpointing a writer's CHAMP root to
-R2, compacting structured-data operation history, and repacking file bytes
+a remote, compacting structured-data operation history, and repacking file bytes
 into chunks or a full blob. A content compaction changes storage
 representation, not logical claim or version identity. Structured-data
 compaction may
@@ -196,14 +197,54 @@ until its causal role is specified.
 
 ---
 
-## 4. Cloudflare R2 Storage and Recovery
+## 4. Working Stores, Remotes, and Recovery
 
-R2 holds immutable CAS objects and packs plus one moving ref per writer. A
-writer uploads referenced blobs, chunks, and tree nodes before publishing the
-ref that reaches them. A new machine must be able to start from a ref with no
-local index or cache.
+### 4.1 One Working Store per Device
 
-### 1. Packing Small Nodes
+Each device has a private working store for its live writes. One local process
+coordinates writes to it; other devices do not open its journal or SQLite
+files through NFS or SMB. The current Rust store has fanned-out content blobs,
+one append-only claim log per document, and a rebuildable SQLite index. A
+future working store adds CHAMP checkpoint packs and a local root pointer.
+The journal makes offline writes durable before a remote checkpoint is
+published. A single journal rolled into segments might batch claims with fewer
+files and syncs than per-document logs, but that change needs its own recovery
+and performance tests. No local claim history is trimmed until its causal role
+after checkpointing is specified.
+
+The working store's physical layout is private and may differ from the remote
+key layout. Its durable claims and checkpoints must still encode the same
+logical IDs and causal facts that other devices recover from a remote. SQLite
+is a rebuildable query and pack-offset index, never the only record of a
+published object.
+
+### 4.2 One Remote Contract, Several Transports
+
+A remote is a sync endpoint in addition to a device's working store. It
+supports reading and writing immutable blobs, representations, and packs;
+discovering writer refs; and publishing refs with the required conditional
+operation. All remotes expose the same object formats, logical IDs, and logical
+key namespace (`blobs/`, `packs/`, `reps/`, `refs/`); a service can map those
+keys to its own working-store layout. Passive remotes share one physical key
+layout. The exact blob-key fanout must be fixed before implementing adapters;
+the current local CAS uses a two-hex-character fanout.
+
+There are two remote forms:
+
+* **Passive storage:** a directory on local disk, a NAS share, a USB drive, or
+  an R2 bucket holds immutable objects and refs. A directory remote contains
+  no live working-store journal or SQLite database and needs no running server.
+* **Transfs service:** a running process answers the remote protocol from its
+  own working store. Its remote API exposes published state while its live
+  journal remains private. It can also provide queries to thin clients, live
+  change announcements, and coordinated updates to shared refs.
+
+LAN and cloud deployments can use either form, and a device can use more than
+one remote. For example, it can publish durable checkpoints to R2 while a LAN
+service provides live announcements. A NAS directory used as a passive remote
+remains available when no transfs process is running on the NAS.
+
+### 4.3 Packing Small Nodes
 
 Fetching every small CHAMP or RRB node as a separate object can make traversal
 request-heavy. Packs group nodes, and range reads fetch selected nodes. A local
@@ -215,30 +256,46 @@ pack design and ownership should be settled with that project rather than
 specified independently here; a writer ref can name a root and the packs
 needed to reach it. Pack size and cache policy require measurement.
 
-### 2. Publishing Roots
+### 4.4 Publishing Roots and Recovering Cold
 
-Each device normally updates only its own ref, so devices do not overwrite one
-shared `head.json`. If several actors must update one official ref, its owner
-needs conditional replacement or a coordinator. [R2 supports conditional
-puts](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/);
-a Durable Object is an option, not a prerequisite for every writer. Per-writer
-refs preserve divergent states; version ancestry and an authority rule still
-decide how readers present them.
+The publication order is the same for every remote: make referenced blobs,
+chunks, nodes, packs, and their indexes durable before publishing a ref that
+reaches them. A writer normally updates only its own ref, so devices do not
+overwrite one shared `head.json`. A ref must identify its writer, sequence,
+root, and the pack IDs or immutable pack-list object needed to reach that root.
+From an empty cache, a new device can discover refs, obtain the pack indexes,
+and load nodes without a local SQLite database.
 
-### 3. Reachability
+The working store publishes its local root only after its referenced data is
+durable, using a crash-safe local operation. A passive directory remote and R2
+must each provide equivalent complete-object publication and the conditional
+ref operation. If several actors update one official ref, they need
+conditional creation of numbered refs or a coordinator. [R2 supports
+conditional puts](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/);
+a Durable Object is one possible coordinator. Per-writer refs preserve
+divergent states; version ancestry and an authority rule still decide how
+readers present them.
+
+### 4.5 Reachability and Garbage Collection
 
 Deleting chunks, old representations, or tombstones requires a retention rule
 that accounts for reachable content versions, all relevant writer refs, and
 offline peers. A failed upload or a crash between writing objects and publishing a ref
 may leave unreachable objects; it must never leave a published ref pointing at
-missing objects.
+missing objects. Deletion on a shared remote additionally needs exclusive
+coordination and a retention rule for readers following older refs. Lease and
+grace-period mechanics remain to be specified and tested. Local collection can
+be coordinated by the working store's single owner.
+
+### 4.6 Published Full Blobs
 
 Curio currently serves whole files from local `assets/`; it has no R2
 integration. Its proposed substrate integration would serve published masters
 by complete-content hash, with rendition generation from whole masters.
 **Proposed serving invariant:** any version reachable from a published
-namespace, or marked served, keeps a full blob at `blobs/<sha256>`. RRB and
-other chunked representations may coexist for unpublished, large, or working
+namespace, or marked served, keeps a full blob in the remote `blobs/`
+namespace, keyed by its complete-content hash. RRB and other chunked
+representations may coexist for unpublished, large, or working
 files. This makes the direct-serving path independent of chunk reconstruction
 and leaves the storage savings to be measured on the remaining workload.
 
@@ -262,9 +319,9 @@ The [causal claim model plan](claim-model-plan.md) details the first gate for
 the Rust repository, including on-disk format and read behavior at unresolved
 forks.
 
-The first implementation changes the claim model in Rust, while no real
-transfs stores need migration. It needs no R2 bucket or object-store mock.
-Work through these gates in order:
+The first implementation changed the claim model in Rust, while no real
+transfs stores needed migration. It needed no R2 bucket or object-store mock.
+Gate 1 is complete; work through the remaining gates in order:
 
 1. **Prove causal semantics locally.** Give every claim a canonical ID and
    field-scoped causal references; give each content version an ID and parent
@@ -314,6 +371,13 @@ Work through these gates in order:
    pub/sub announcements, an offline concurrent edit canceling a pending
    drop, all-writer observation, and authority retirement of a writer that
    never returns. A sole active writer can finalize its own drop immediately.
+
+Start the remote storage gate with a private working store syncing through a
+directory remote. Exercise crash-before-ref recovery, simultaneous ref
+publication, and recovery on a second device with an empty cache. A directory
+remote contains only portable remote objects and refs, not a shared copy of
+the live working store. Add the transfs service and R2 adapters against the
+same remote contract after that gate.
 
 Correct causal state and recoverability are mandatory. The chunk measurement
 decides whether RRB work is justified now or should wait for a Pandora editor.
