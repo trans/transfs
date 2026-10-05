@@ -1,0 +1,12 @@
+[package]
+name = "chunk-study"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone: a measurement tool, not part of the transfs build.
+[workspace]
+
+[dependencies]
+fastcdc = "3.1"
+sha2 = "0.10.9"

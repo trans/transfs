@@ -1,0 +1,269 @@
+# Chunk study
+
+> **Status:** in progress, 2026-10-05. This is gate 2 of the
+> [whitepaper's validation plan](data_centric_architecture_architecture_whitepaper.md#6-validation-plan-for-pandora-and-transfs).
+> One measurement is still to come: two snapshots of real, actively used
+> SQLite databases taken a day apart ([still to measure](#still-to-measure)).
+
+transfs stores every version of a file as one complete blob. When two versions
+share most of their bytes, both copies are stored in full. Storing files as
+**chunks** instead (pieces of a file, each stored once under its own hash)
+keeps a shared piece once, so a new version costs only its changed chunks plus
+a list of the chunks it is made of.
+
+For example, a 3.4 MB GIMP file gets a small brush stroke. Stored whole, the new
+version costs another 3.4 MB. Cut into content-defined chunks averaging 4 KiB,
+it costs about 90 KB: the few chunks the stroke changed, plus the new version's
+chunk list.
+
+This study measures how much chunking saves on real file types, and which way
+of cutting chunks works for each.
+
+## The short answer
+
+- **GIMP files (XCF): a large saving, with content-defined chunks.** A typical
+  edit costs 1–10% of a whole-file copy. Different images share 29% of their
+  bytes. Fixed-size chunks get almost none of this.
+- **SQLite databases: a large saving, with fixed chunks the size of a database
+  page.** Ordinary updates cost 9% of a whole-file copy, a bulk insert 15%.
+  Content-defined chunks cost about twice that.
+- **PNG exports keep the part of the file before the first change; WebP exports
+  share nothing.**
+- **An edit that changes every pixel saves nothing**, and chunking adds about
+  1.5% on top of a whole-file copy.
+
+## How it was measured
+
+`tools/chunk-study` reads files and prints a table with one row per way of
+cutting chunks. It only reads its input. It has two modes:
+
+- `corpus LABEL FILE...` stores every file in one place and reports what the
+  whole set costs. This measures sharing between different files.
+- `pairs LABEL OLD NEW ...` stores OLD, then reports what NEW adds. This
+  measures what a new version costs. Rows are summed over all pairs.
+
+It compares ten ways of storing a file:
+
+- **whole file**: one blob per distinct file, as transfs stores files today.
+  This is the baseline every percentage is measured against.
+- **fixed 1, 4, 16 or 64 KiB**: the file cut every N bytes.
+- **FastCDC, average 4, 8, 16, 32 or 64 KiB**: content-defined chunking. The cut
+  points are chosen by looking at the bytes themselves, so after an insertion
+  or deletion the same content is cut at the same places again. Chunk sizes
+  vary between a quarter of the average and four times it.
+
+Chunked storage also pays for bookkeeping: 32 bytes per chunk in each version's
+chunk list, and 48 bytes per new chunk in a pack index. Both are included in
+every total. Each version is charged for its whole chunk list, as if the list
+were stored flat; a tree-shaped list (see [what this means](#what-this-means-for-transfs))
+stores only the parts that changed, so for large files the totals below are
+pessimistic. Chunks are written in packs of up to 4 MiB. A GIMP version's new
+chunks fit in one pack, so it needs one stored object, as a whole file does. A
+SQLite version needs several: with FastCDC 4 KiB, 5 for ordinary use and 21
+for the `VACUUM` pair, where a whole file needs one.
+
+Speed, on one core of the dev machine: hashing whole files runs at about
+1.1 GB/s; FastCDC plus hashing at about 0.8 GB/s.
+
+## Results
+
+All percentages are of the whole-file cost. Lower is better.
+
+### Different GIMP files
+
+The 37 distinct XCF files in Silicon Circus, 125.6 MiB in total:
+
+| fixed 4 KiB | fixed 64 KiB | FastCDC 4 KiB | FastCDC 16 KiB | FastCDC 64 KiB |
+|---:|---:|---:|---:|---:|
+| 95.6% | 94.3% | **71.3%** | 74.5% | 78.6% |
+
+Different images share content, most likely reused layers. The shared regions
+sit at different offsets in different files, so fixed-size chunks miss them.
+
+The whitepaper describes this set as "171 files, about 371 MB". There are 171
+files, but they hold only 37 distinct contents, and they total 582 MiB:
+curio hard-links its copies, so `du` counts each copy once. Storing whole files
+once already reduces the 582 MiB to 125.6 MiB, so 125.6 MiB is the real
+baseline. No file has more than one version, and curio's history holds only two
+renames, so the version pairs below were made by scripted edits.
+
+### GIMP edits
+
+Each of the 37 files was opened in GIMP 3.2 and saved unchanged (the *resave*).
+Each edit then starts from that resave, so a pair measures the edit and not GIMP
+rewriting the file. 37 pairs per row:
+
+| version | whole files | fixed 4 KiB | FastCDC 4 KiB | FastCDC 16 KiB | FastCDC 64 KiB |
+|---|---:|---:|---:|---:|---:|
+| original → resave | 125.4 MiB | 100.4% | 1.1% | 1.1% | 3.5% |
+| resave → resave again¹ | 50.3 MiB | 0.9% | 0.9% | 0.9% | 1.6% |
+| small brush stroke | 125.3 MiB | 61.6% | **2.5%** | 3.9% | 10.7% |
+| long vertical stroke | 123.9 MiB | 100.2% | **10.5%** | 21.2% | 57.7% |
+| new layer | 126.7 MiB | 102.0% | **2.2%** | 2.2% | 4.8% |
+| layer moved | 125.4 MiB | 1.0% | **0.9%** | 1.0% | 3.0% |
+| colour change on the main layer | 112.0 MiB | 102.0% | 101.4% | 100.3% | 100.1% |
+
+¹ 23 of the 37 files saved byte-identically the second time and cost nothing
+under any method; the other 14 differed in about one byte. Saving is close to
+deterministic, so the pairs measure the edits.
+
+Why fixed-size chunks fail here: XCF compresses each 64×64 tile separately. A
+changed tile compresses to a different length, which moves every byte after
+it, so every fixed chunk after the first change is new. Content-defined chunks
+find the same cut points again right after the change. The vertical stroke
+touches one tile in every row, spread through the layer's data, so it changes
+more chunks; larger chunks lose more because each one is likelier to contain a
+change.
+
+### SQLite
+
+A generated application database (items, tags and events, with indexes), about
+122 MiB, 4 KiB pages. Snapshots were taken with SQLite's backup API, which keeps
+the page layout. One pair per row:
+
+| change | whole file | fixed 1 KiB | fixed 4 KiB | fixed 16 KiB | FastCDC 4 KiB | FastCDC 16 KiB |
+|---|---:|---:|---:|---:|---:|---:|
+| ordinary use: 500 rows edited, 2,000 added, 300 deleted | 122.6 MiB | 8.0% | **8.8%** | 25.9% | 16.3% | 37.3% |
+| bulk insert, 10% more rows | 134.7 MiB | 16.7% | **15.3%** | 28.3% | 22.8% | 38.6% |
+| `VACUUM` (run on a copy) | 133.0 MiB | 45.7% | **42.5%** | 92.5% | 61.0% | 84.0% |
+
+SQLite changes a database in whole pages, and pages never move. Fixed chunks
+the size of a page therefore match exactly what changed. The 500 scattered edits
+and their index updates touched about 2,500 of the database's 31,000 pages;
+with 16 KiB chunks each change spoils four pages' worth, and with 64 KiB chunks
+(not shown, 64%) nearly every chunk holds a change. Content-defined chunks
+ignore the page boundaries and pay for it at both edges of every changed page.
+
+Fixed 1 KiB chunks store slightly less than 4 KiB ones, but their bookkeeping
+costs more than they save.
+
+### Real SQLite use
+
+Codex's conversation-history database, 307 MiB with 4 KiB pages, copied at
+02:46 and again at 15:47 on 2026-10-05. Codex was broken for most of that day,
+so little changed: 79 bytes in two pages.
+
+| | new chunk data | chunk list | total |
+|---|---:|---:|---:|
+| whole file | | | 307.1 MiB |
+| fixed 4 KiB | 8 KiB | 2.4 MiB | 2.4 MiB (0.8%) |
+| FastCDC 4 KiB | 11 KiB | 1.9 MiB | 1.9 MiB (0.6%) |
+
+Almost all of the cost is the flat chunk list: about 78,000 entries written
+again to record two changed pages. A tree-shaped list would have rewritten a
+few nodes. A pair spanning a day of ordinary use is still to come.
+
+### PNG and WebP exports
+
+The resave and small-stroke versions of the 37 files, flattened and exported:
+
+| small brush stroke | whole files | fixed 4 KiB | FastCDC 4 KiB | FastCDC 64 KiB |
+|---|---:|---:|---:|---:|
+| PNG | 48.6 MiB | 67.7% | 67.6% | 74.8% |
+| WebP | 7.8 MiB | 102.0% | 101.6% | 100.1% |
+
+PNG compresses the image row by row from the top, so everything before the
+first changed row compresses to the same bytes and is shared. The stroke here
+sits 45–50% of the way down, so about a third of each file is shared; an edit
+near the bottom would share more, one near the top almost nothing. Because the
+shared part starts at the beginning of the file, fixed and content-defined
+chunks do equally well. WebP compresses the whole image together and shares
+nothing.
+
+## What this means for transfs
+
+Two ways of cutting chunks, chosen by file type, with one way of storing them:
+
+1. **Most files: content-defined chunks, 8 KiB average (decided 2026-10-05).**
+   FastCDC with a 2 KiB minimum and a 32 KiB maximum. Smaller chunks store
+   less, but every chunk costs an entry in the index of stored chunks and
+   another piece to fetch on read. 8 KiB is where the curve bends: it keeps
+   nearly all of 4 KiB's saving with half as many chunks.
+
+   | FastCDC average | 4 KiB | 8 KiB | 16 KiB | 32 KiB | 64 KiB |
+   |---|---:|---:|---:|---:|---:|
+   | different XCFs | 71.3% | 73.0% | 74.5% | 76.5% | 78.6% |
+   | small stroke | 2.5% | 2.8% | 3.9% | 7.2% | 10.7% |
+   | long vertical stroke | 10.5% | 14.5% | 21.2% | 37.8% | 57.7% |
+   | new layer | 2.2% | 2.0% | 2.2% | 3.0% | 4.8% |
+
+   Roughly 100 bytes of index per chunk, so a terabyte of distinct data is
+   about 134 million chunks and a 13 GB index at 8 KiB (27 GB at 4 KiB, 7 GB at
+   16 KiB). If real stores grow to where that hurts, move to 16 KiB. A change
+   only loses sharing between versions stored before and after it, because a
+   version's identity is its content hash. The chunking parameters (sizes and
+   FastCDC's settings) must be fixed in the format, since writers share chunks
+   only if they cut the same way. One size for all files: choosing by file size
+   would cut a file differently once it grew past the threshold, and its
+   versions would stop sharing.
+2. **SQLite files: fixed-size chunks, one database page each.** A SQLite file
+   starts with `SQLite format 3\0`, and bytes 16–17 give the page size
+   (usually 4 KiB). Fixed page-sized chunks halve the cost of SQLite versions
+   compared with content-defined chunks, and this is the workload @pandora is
+   waiting on.
+3. **Either way, a file version is a list of chunk references, held in
+   merkle-champ's `Sequence`.** The chunks can be any length and are stored once
+   each under their own hash; the list holds each chunk's identity and length.
+   The list's structure matters for big files. A 307 MiB database at 4 KiB is
+   about 78,000 chunks, a 2.4 MiB list: stored flat, every version would write
+   all of it again, even for a change to two pages (measured on a real
+   database, below). `Sequence` is a content-defined tree (a "prolly tree"): a
+   rolling hash over the entries decides where its nodes end, the same idea
+   FastCDC applies to bytes. An edit, including an insert that shifts every
+   later entry, rewrites only the nodes near it, about 3–4 nodes at a million
+   entries, and equal lists always have equal identities. Branches will carry
+   each child's byte length, so finding the chunk that holds a given byte is one
+   walk down the tree.
+4. **No RRB tree is needed for storage.** Content-defined chunks already keep
+   an edit's cost local. An RRB tree would only be needed for an editor that
+   splices bytes in place.
+5. **Small files** were not measured. Below some size the chunk list costs more
+   than chunking can save, so they should stay whole blobs; the threshold is
+   still to be found.
+
+## Still to measure
+
+- **A day of real SQLite use.** Two working databases (Codex's conversation
+  history, 307 MiB, and its logs, 121 MiB) were copied on 2026-10-05 at 02:46.
+  The first later copy caught a day on which Codex was broken
+  ([above](#real-sqlite-use)). A copy after ordinary use will show what real
+  work changes, which no generated workload can.
+- **Audio and video** were not tested.
+
+## Limits
+
+- The GIMP edits are scripted, made with one GIMP version on 37 images from
+  one project. Real editing sessions mix several kinds of edit before saving.
+- The SQLite database is generated; its schema and access pattern are guesses
+  at an application's.
+- Each baseline resave cleared any saved selection, which would otherwise
+  confine the scripted paint. One file had one.
+
+## Rerunning
+
+The tool and the scripts that made the test files are in `tools/chunk-study/`.
+Generated files go in `~/.local/share/transfs-chunk-study/`, outside the
+repository.
+
+```sh
+cd tools/chunk-study
+cargo build --release
+
+# SQLite snapshots (seeded, so the same every run)
+python3 make_sqlite.py ~/.local/share/transfs-chunk-study/sqlite
+
+# GIMP edit versions, then PNG and WebP exports
+XCF_LIST=sources.txt XCF_OUT=~/.local/share/transfs-chunk-study/xcf-edits \
+  gimp-console -i --quit --batch-interpreter=python-fu-eval \
+  -b 'exec(open("make_xcf_edits.py").read())'
+XCF_OUT=~/.local/share/transfs-chunk-study/xcf-edits \
+  gimp-console -i --quit --batch-interpreter=python-fu-eval \
+  -b 'exec(open("export_flat.py").read())'
+
+# Measure a pair
+D=~/.local/share/transfs-chunk-study/sqlite
+target/release/chunk-study pairs "SQLite: ordinary use" $D/base.sqlite $D/updates.sqlite
+```
+
+`sources.txt` lists one XCF path per line; the run above used one path for each
+of the 37 distinct XCF contents in Silicon Circus.
