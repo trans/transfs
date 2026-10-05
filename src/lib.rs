@@ -10,6 +10,7 @@ pub mod pack;
 pub mod query;
 pub mod remote;
 pub mod replica;
+mod writer;
 
 #[cfg(feature = "native")]
 pub mod index;

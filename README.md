@@ -76,6 +76,7 @@ The store layout is:
   blobs/<hh>/<sha256>
   .transfs/docs/<hh>/<document-id>.log
   .transfs/index.db
+  .transfs/writer.json
 ```
 
 The database is disposable. Delete it or run `transfs reindex` to rebuild it
@@ -83,14 +84,26 @@ from the claim logs.
 
 ## Directory remote checkpoint
 
-Publish a checkpoint under a stable writer ID, then recover it into a new
+Check a directory remote, publish a checkpoint, then recover it into a new
 working store on another device:
 
 ```sh
+transfs remote-check /mnt/transfs-remote
 transfs --store laptop/store publish /mnt/transfs-remote laptop
 transfs --store restored/store recover /mnt/transfs-remote
 transfs --store restored/store check
 ```
+
+The optional `laptop` argument is a display label. Each working store mints
+its own time-prefixed random writer ID; it cannot be chosen on the command
+line. Keep `.transfs/writer.json` with the store when backing it up. Copying a
+working store to a second live device also copies its writer ID, so publishing
+from one copy will stop the other until it gets a new writer identity.
+Run `transfs --store copied/store fork-writer` on the copy to give it a new
+writer chain while retaining its local claims, then publish it again.
+Stores published with the older manually supplied writer ID start a new
+writer chain on their first publish with this version; the old refs remain
+readable during recovery.
 
 The recovery target must not exist. A remote stores immutable blobs and CHAMP
 packs plus append-only writer refs; it does not contain the live claim logs or

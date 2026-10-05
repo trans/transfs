@@ -373,7 +373,7 @@ dependencies = [
 [[package]]
 name = "merkle-champ"
 version = "0.2.0"
-source = "git+https://github.com/tabcomputing/merkle-champ?rev=37d2dcd48a32e4c6961f634b660b90cf2c8bc3f4#37d2dcd48a32e4c6961f634b660b90cf2c8bc3f4"
+source = "git+https://github.com/tabcomputing/merkle-champ?rev=03a4dcb7b92bbbbd61798e5ff5550966fd95d309#03a4dcb7b92bbbbd61798e5ff5550966fd95d309"
 dependencies = [
  "sha2",
 ]
@@ -381,6 +381,7 @@ dependencies = [
 [[package]]
 name = "merkle-champ-pack"
 version = "0.1.0"
+source = "git+https://github.com/tabcomputing/merkle-champ?rev=03a4dcb7b92bbbbd61798e5ff5550966fd95d309#03a4dcb7b92bbbbd61798e5ff5550966fd95d309"
 dependencies = [
  "merkle-champ",
  "sha2",

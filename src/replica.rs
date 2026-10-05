@@ -8,6 +8,7 @@ use crate::{
     log::{Log, StoreLock},
     pack,
     remote::{ensure_dir, hash_bytes, valid_hash, valid_writer, RemoteStore},
+    writer::{PendingRef, WriterState},
     Error, Result,
 };
 use merkle_champ::{ChampMap, Identity, Objects};
@@ -52,11 +53,41 @@ struct PublishedRef {
     hash: String,
 }
 
+/// Give a copied working store its own writer chain while retaining its claims.
+pub fn fork_writer(root: &Path, label: Option<&str>) -> Result<(String, String)> {
+    let _lock = StoreLock::acquire(root)?;
+    let mut state = WriterState::load_or_create(root)?;
+    let previous = state.id.clone();
+    state.fork()?;
+    if let Some(label) = label {
+        state.label = Some(label.to_owned());
+    }
+    state.save(root)?;
+    Ok((previous, state.id))
+}
+
 /// Publish a self-contained checkpoint after all referenced bytes are durable.
-pub fn publish(library: &Library, remote: &dyn RemoteStore, writer: &str) -> Result<PublishReport> {
-    valid_writer(writer)?;
+/// The optional label is for display; the store's durable ID owns the ref chain.
+pub fn publish(
+    library: &Library,
+    remote: &dyn RemoteStore,
+    label: Option<&str>,
+) -> Result<PublishReport> {
+    let _lock = StoreLock::acquire(&library.root)?;
+    let mut state = WriterState::load_or_create(&library.root)?;
+    if let Some(label) = label {
+        state.label = Some(label.to_owned());
+    }
+    let writer = state.id.clone();
+    valid_writer(&writer)?;
+    let mut previous = latest_ref(remote, &writer)?;
+    reconcile_pending(&mut state, remote, &library.root, &mut previous)?;
+    if previous.as_ref().map(|published| published.hash.as_str()) != state.last_ref.as_deref() {
+        return Err(Error::Storage(format!(
+            "another device is publishing as writer {writer}; remote tip differs from this store's last published ref"
+        )));
+    }
     let (ledger, blobs) = ledger_from_logs(&library.root)?;
-    let previous = latest_ref(remote, writer)?;
     let mut objects = if let Some(ref previous) = previous {
         let objects = load_objects(remote, &previous.value.packs)?;
         let prior_root = decode_identity(&previous.value.root)?;
@@ -81,8 +112,9 @@ pub fn publish(library: &Library, remote: &dyn RemoteStore, writer: &str) -> Res
     let root_hex = hex::encode(root);
     if let Some(ref previous) = previous {
         if previous.value.root == root_hex {
+            state.save(&library.root)?;
             return Ok(PublishReport {
-                writer: writer.into(),
+                writer: writer.clone(),
                 sequence: previous.value.sequence,
                 root: root_hex,
                 changed: false,
@@ -108,7 +140,7 @@ pub fn publish(library: &Library, remote: &dyn RemoteStore, writer: &str) -> Res
     packs.push(pack_id);
     let reference = WriterRef {
         format: 1,
-        writer: writer.into(),
+        writer: writer.clone(),
         sequence,
         previous: previous.map(|old| old.hash),
         root: root_hex.clone(),
@@ -116,17 +148,73 @@ pub fn publish(library: &Library, remote: &dyn RemoteStore, writer: &str) -> Res
     };
     let bytes = serde_json::to_vec(&reference)
         .map_err(|e| Error::Storage(format!("cannot encode writer ref: {e}")))?;
-    if !remote.publish_ref(writer, sequence, &bytes)? {
+    let hash = hash_bytes(&bytes);
+    state.pending = Some(PendingRef {
+        sequence,
+        hash: hash.clone(),
+        json: String::from_utf8(bytes.clone()).expect("JSON is UTF-8"),
+    });
+    state.save(&library.root)?;
+    if !remote.publish_ref(&writer, sequence, &bytes)? {
         return Err(Error::Storage(format!(
-            "writer ref {writer}/{sequence} was published concurrently; read it before retrying"
+            "writer ref {writer}/{sequence} is occupied; another device may own this writer, or an interrupted ref needs repair"
         )));
     }
+    state.last_ref = Some(hash);
+    state.pending = None;
+    state.save(&library.root)?;
     Ok(PublishReport {
-        writer: writer.into(),
+        writer,
         sequence,
         root: root_hex,
         changed: true,
     })
+}
+
+fn reconcile_pending(
+    state: &mut WriterState,
+    remote: &dyn RemoteStore,
+    root: &Path,
+    previous: &mut Option<PublishedRef>,
+) -> Result<()> {
+    let Some(pending) = state.pending.clone() else {
+        return Ok(());
+    };
+    let reference: WriterRef = serde_json::from_str(&pending.json)
+        .map_err(|e| Error::Storage(format!("invalid pending writer ref: {e}")))?;
+    if reference.format != 1
+        || reference.writer != state.id
+        || reference.sequence != pending.sequence
+        || reference.previous != state.last_ref
+    {
+        return Err(Error::Storage(
+            "pending writer ref does not match local state".into(),
+        ));
+    }
+    let tip = previous.as_ref().map(|published| published.hash.as_str());
+    if tip == Some(pending.hash.as_str()) {
+        state.last_ref = Some(pending.hash);
+        state.pending = None;
+        state.save(root)?;
+        return Ok(());
+    }
+    if tip != state.last_ref.as_deref() {
+        return Err(Error::Storage(format!(
+            "another device is publishing as writer {}; remote tip differs from the pending ref",
+            state.id
+        )));
+    }
+    if !remote.publish_ref(&state.id, pending.sequence, pending.json.as_bytes())? {
+        return Err(Error::Storage(format!(
+            "pending writer ref {}/{} is occupied by different bytes or an unmarked reservation",
+            state.id, pending.sequence
+        )));
+    }
+    state.last_ref = Some(pending.hash.clone());
+    state.pending = None;
+    state.save(root)?;
+    *previous = latest_ref(remote, &state.id)?;
+    Ok(())
 }
 
 /// Recover all writer roots into a new, absent working-store directory.
@@ -220,7 +308,6 @@ pub fn recover(remote: &dyn RemoteStore, target: &Path) -> Result<RecoverReport>
 }
 
 fn ledger_from_logs(root: &Path) -> Result<(Ledger, BTreeSet<String>)> {
-    let _lock = StoreLock::acquire(root)?;
     let mut ledger = Ledger::new();
     let mut blobs = BTreeSet::new();
     for doc_id in Log::all_ids(root)? {

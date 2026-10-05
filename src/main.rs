@@ -43,7 +43,7 @@ fn run() -> CliResult<i32> {
         env::current_dir()?.join(root)
     };
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
-        println!("transfs [--store DIR] <command> [args]\n\ncommands: add addversion rename tag untag set list find reindex check cat show versions mount publish recover\n\naddversion ID FILE [--parents VERSION_ID,...]\ncat ID [VERSION_ID]\npublish REMOTE_DIR WRITER_ID\nrecover REMOTE_DIR  (into a store path that does not exist)");
+        println!("transfs [--store DIR] <command> [args]\n\ncommands: add addversion rename tag untag set list find reindex check cat show versions mount publish recover fork-writer remote-check\n\naddversion ID FILE [--parents VERSION_ID,...]\ncat ID [VERSION_ID]\npublish REMOTE_DIR [LABEL]\nrecover REMOTE_DIR  (into a store path that does not exist)\nfork-writer [LABEL]  (give a copied store its own writer ID)\nremote-check REMOTE_DIR");
         return Ok(0);
     }
     let command = args.remove(0);
@@ -263,8 +263,8 @@ fn run() -> CliResult<i32> {
         "publish" => {
             let remote =
                 DirectoryRemote::new(required(&mut args, "publish needs a remote directory")?);
-            let writer = required(&mut args, "publish needs a writer ID")?;
-            let report = replica::publish(&lib, &remote, &writer)?;
+            let label = args.first().map(String::as_str);
+            let report = replica::publish(&lib, &remote, label)?;
             if report.changed {
                 println!(
                     "published {} sequence {} root {}",
@@ -293,6 +293,30 @@ fn run() -> CliResult<i32> {
                 "recovered {} documents, {} blobs from {} writers",
                 report.documents, report.blobs, report.writers
             );
+        }
+        "fork-writer" => {
+            let (old, new) = replica::fork_writer(&root, args.first().map(String::as_str))?;
+            println!("forked writer {old} -> {new}");
+        }
+        "remote-check" => {
+            let remote = DirectoryRemote::new(required(
+                &mut args,
+                "remote-check needs a remote directory",
+            )?);
+            let capabilities = remote.check()?;
+            println!(
+                "hard links: {}; exclusive create: {}; replace existing: {}; directory sync: {}",
+                capabilities.hard_links,
+                capabilities.exclusive_create,
+                capabilities.replace_existing,
+                capabilities.directory_sync
+            );
+            if !capabilities.exclusive_create
+                || !capabilities.directory_sync
+                || !capabilities.replace_existing
+            {
+                return Ok(1);
+            }
         }
         _ => return Err(format!("unknown command: {command}").into()),
     }

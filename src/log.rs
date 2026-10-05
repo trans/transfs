@@ -21,6 +21,7 @@ impl StoreLock {
             .truncate(false)
             .open(dir.join("lock"))?;
         file.lock()?;
+        crate::writer::WriterState::load_or_create(root)?;
         Ok(Self { _file: file })
     }
 }
