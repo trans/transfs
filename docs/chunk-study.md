@@ -1,9 +1,9 @@
 # Chunk study
 
-> **Status:** in progress, 2026-10-05. This is gate 2 of the
+> **Status:** 2026-10-06. This is gate 2 of the
 > [whitepaper's validation plan](data_centric_architecture_architecture_whitepaper.md#6-validation-plan-for-pandora-and-transfs).
-> Real SQLite use has been measured on one database; a second is still to come
-> ([still to measure](#still-to-measure)).
+> Measured on GIMP files, generated and real SQLite databases, and PNG and
+> WebP exports; audio and video are [still to measure](#still-to-measure).
 
 transfs stores every version of a file as one complete blob. When two versions
 share most of their bytes, both copies are stored in full. Storing files as
@@ -25,8 +25,10 @@ of cutting chunks works for each.
   edit costs 1–10% of a whole-file copy. Different images share 29% of their
   bytes. Fixed-size chunks get almost none of this.
 - **SQLite databases: a large saving, with fixed chunks the size of a database
-  page.** Ordinary updates cost 9% of a whole-file copy, a bulk insert 15%.
-  Content-defined chunks cost about twice that.
+  page.** On a generated database, ordinary updates cost 9% of a whole-file
+  copy and a bulk insert 15%. On real ones, a session of an append-heavy
+  database adds under 0.5% of the file in new chunks, and a day of a log
+  database that reuses its pages 19%. Content-defined chunks cost up to 2.5 times as much.
 - **PNG exports keep the part of the file before the first change; WebP exports
   share nothing.**
 - **An edit that changes every pixel saves nothing**, and chunking adds about
@@ -139,26 +141,31 @@ costs more than they save.
 
 ### Real SQLite use
 
-Codex's conversation-history database, about 307 MiB with 4 KiB pages, copied
-three times: at 02:46 and 15:47 on 2026-10-05, and at 00:25 the next night.
-Codex was broken for most of that day, so the first pair changed only 79 bytes
-in two pages. The second pair spans an evening of ordinary use, during which
-the database grew by 556 KiB.
+Two databases Codex uses every day, both with 4 KiB pages: its conversation
+history (about 308 MiB), which mostly grows by appending, and its logs (about
+121 MiB), which stay the same size because old entries are pruned and their
+pages reused. Copies were taken at 02:46 and 15:47 on 2026-10-05, and at 00:25
+and 05:33 on 2026-10-06, with Codex stopped or idle so each copy was a
+consistent database. Codex was broken for most of 2026-10-05, so the first
+pair changed only 79 bytes in two pages.
 
-| | new chunk data | chunk list | total |
+| pair | whole file | fixed 4 KiB (one page) | FastCDC 8 KiB |
 |---|---:|---:|---:|
-| **broken day:** whole file | | | 307.1 MiB |
-| fixed 4 KiB (one page) | 8 KiB | 2.4 MiB | 2.4 MiB (0.8%) |
-| FastCDC 4 KiB | 11 KiB | 1.9 MiB | 1.9 MiB (0.6%) |
-| **evening of use:** whole file | | | 307.7 MiB |
-| fixed 4 KiB (one page) | 0.7 MiB | 2.4 MiB | 3.1 MiB (1.0%) |
-| FastCDC 8 KiB | 1.1 MiB | 0.9 MiB | 2.0 MiB (0.7%) |
+| history, broken day (02:46 → 15:47) | 307.1 MiB | 0.8% (2 pages) | 0.6% |
+| history, an evening of use (15:47 → 00:25) | 307.7 MiB | 1.0% (171 pages) | 0.7% |
+| history, overnight (00:25 → 05:33) | 308.8 MiB | 1.3% (378 pages) | 1.2% |
+| logs, about a day (02:46 → 05:33 next day) | 120.6 MiB | **19.0%** (5,550 pages) | 47.8% |
 
-A conversation history mostly appends, so an evening's work touched 171 of
-about 78,000 pages. With page-sized chunks the new data is 0.7 MiB, 0.23% of
-the file. Almost all of the rest is the flat chunk list, written again in full
-for every version; a tree-shaped list would rewrite a few nodes instead, so the
-real cost of a version is close to its new data alone.
+For the conversation history, nearly all of each total is the flat chunk list,
+written again in full for every version (2.4 MiB at 4 KiB). The new data alone
+is 0.7 MiB for the evening and 1.5 MiB overnight, 0.2–0.5% of the file, which
+is what a version costs with a tree-shaped list.
+
+The log database is the scattered-edit case on real data: a day of writes
+touched about 18% of its pages, spread through the file as freed pages were
+reused. Page-sized chunks store those pages and nothing else; content-defined
+chunks also lose the bytes on either side of every changed page, and store
+2.5 times as much.
 
 ### PNG and WebP exports
 
@@ -230,17 +237,14 @@ Two ways of cutting chunks, chosen by file type, with one way of storing them:
 
 ## Still to measure
 
-- **Codex's log database** (121 MiB) was in use at each copy after the first,
-  with uncommitted changes in its `-wal` file, so it could not be copied safely
-  yet.
 - **Audio and video** were not tested.
 
 ## Limits
 
 - The GIMP edits are scripted, made with one GIMP version on 37 images from
   one project. Real editing sessions mix several kinds of edit before saving.
-- The SQLite database is generated; its schema and access pattern are guesses
-  at an application's.
+- The generated SQLite database's schema and access pattern are guesses at an
+  application's. The real databases are two, both from one application.
 - Each baseline resave cleared any saved selection, which would otherwise
   confine the scripted paint. One file had one.
 
