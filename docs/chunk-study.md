@@ -32,9 +32,10 @@ of cutting chunks works for each.
   database that reuses its pages 19%. Content-defined chunks cost up to 2.5 times as much.
 - **PNG exports keep the part of the file before the first change; WebP exports
   share nothing.**
-- **Compressing each chunk with zstd and a dictionary roughly halves what
-  SQLite versions cost again** (generated database 4.5%, Codex's logs 4.9%),
-  and trims GIMP versions a little.
+- **Compressing each chunk with zstd, plus a dictionary trained on the
+  database's own content, roughly halves what SQLite versions cost again**
+  (generated database 4.5%, Codex's logs 4.9%), and trims GIMP versions a
+  little.
 - **An edit that changes every pixel saves nothing**, and chunking adds about
   1.5% on top of a whole-file copy.
 
@@ -254,8 +255,8 @@ later version is far cheaper chunked than compressed whole (0.9–4.9% against
 
 A 110 KiB dictionary, zstd's usual size, did clearly better than 16 KiB: on
 Codex's logs, 4.9% against 5.5% per version and 30.1% against 33.4% fresh. A
-dictionary is stored once per kind of file, so its size costs nothing that
-matters.
+dictionary is stored once per database, so its size costs little next to a
+large file.
 
 Higher zstd levels compress a little better and run much slower (one core):
 
@@ -270,6 +271,65 @@ Version costs barely change with the level (SQLite 4.5% at level 3, 4.0% at
 level 19). Level 3 keeps writes fast. Because a chunk's identity is its
 uncompressed hash, rarely used chunks can be recompressed at a high level
 later, in the background, without changing anything that refers to them.
+
+### Where a dictionary helps
+
+The dictionaries above were trained on the previous version of the same file.
+Trained on other files, they did not help. Measured with `zstd`'s benchmark
+mode, compressing the generated database's bulk-insert version in 4 KiB pages:
+
+| dictionary trained on | compression |
+|---|---:|
+| none | 1.79× |
+| an earlier version of the same database | **2.46×** |
+| another database with the same schema and different data | 1.77× |
+| a database with a different schema | 1.76× |
+
+PNG gained nothing from a dictionary trained on other images (1.000× without,
+0.999× with), and GIMP files nothing from one trained on all 37 XCFs (1.279×
+without, 1.273× with). A dictionary helps by knowing a file's own vocabulary,
+not its format. The generated databases draw their words from a random
+vocabulary that differs per database, so two real databases from one
+application may share more than these did; that is untested.
+
+### Compute cost
+
+On one core of the dev machine (Intel Core Ultra 7 155H), from `zstd`'s
+benchmark mode and this tool:
+
+| step | speed |
+|---|---:|
+| SHA-256 of a whole file (what transfs does today) | 1.1–1.8 GB/s |
+| fixed-size chunks plus SHA-256 per chunk | 1.0–1.1 GB/s |
+| FastCDC plus SHA-256 per chunk | 0.8 GB/s |
+| zstd level 3, 4–8 KiB chunks | 290–310 MB/s |
+| zstd level 3, 4–8 KiB chunks with a dictionary | 200–240 MB/s |
+| training a dictionary on 120 MiB of samples | about 3 s, once |
+| zstd decompression, 4–8 KiB chunks | 800–930 MB/s |
+| zstd decompression, a whole file | 1.1–1.3 GB/s |
+
+Chunking costs about a third more than today's single hash. Compression is the
+expensive step, about four times slower than chunking, so storing a large file
+fresh runs at about 190 MB/s on one core. Two things soften that:
+
+- **Only new chunks are compressed.** A new version is read and chunked in
+  full but compressed only where it changed. For Codex's log database that is
+  about 0.15 s to chunk 120 MiB and 0.09 s to compress the 22 MiB that changed,
+  about the same work as compressing the whole file once.
+- **Chunks are independent**, so compression spreads across cores. On a few
+  cores it outruns most disks, and it is far faster than uploading to a remote
+  store over a home connection, where it saves time by sending a quarter of the
+  bytes or less.
+
+Put together, writing new data with compression runs at about 220 MB/s per
+core: about four times slower than chunking alone, and five to eight times
+slower than today's single hash. Because a chunk's identity is the hash of its
+uncompressed bytes, compression could also be deferred: chunks stored raw at
+chunking speed and compressed later in the background, with no identity
+changed. Already-compressed formats skip compression and always write at
+chunking speed.
+
+Reading is cheap: a 3.5 MB GIMP file decompresses in about 4 ms.
 
 ## What this means for transfs
 
@@ -315,10 +375,11 @@ Two ways of cutting chunks, chosen by file type, with one way of storing them:
    entries, and equal lists always have equal identities. Branches will carry
    each child's byte length, so finding the chunk that holds a given byte is one
    walk down the tree.
-4. **Compress each chunk with zstd at level 3, using a dictionary of about
-   110 KiB per kind of file.** Skip compression for formats that are already
-   compressed, such as WebP. The per-type settings are collected in
-   [file types](file-types.md).
+4. **Compress each chunk with zstd at level 3.** A large SQLite database also
+   gets its own dictionary of about 110 KiB, trained on its own content; a
+   dictionary trained on other files did not help. Formats that are already
+   compressed, such as PNG and WebP, are stored as they are. The per-type
+   settings are collected in [file types](file-types.md).
 5. **No RRB tree is needed for storage.** Content-defined chunks already keep
    an edit's cost local. An RRB tree would only be needed for an editor that
    splices bytes in place.
@@ -336,9 +397,11 @@ Two ways of cutting chunks, chosen by file type, with one way of storing them:
   one project. Real editing sessions mix several kinds of edit before saving.
 - The generated SQLite database's schema and access pattern are guesses at an
   application's. The real databases are two, both from one application.
-- Each dictionary was trained on the previous version of the same file, the
-  best case. A store would train one dictionary per kind of file from other
-  files, which may compress somewhat less.
+- The dictionaries in the compression tables were trained on the previous
+  version of the same file. Dictionaries trained on other files gained nothing
+  ([where a dictionary helps](#where-a-dictionary-helps)), but the generated
+  databases share no vocabulary, so real databases from one application are
+  untested.
 - Each baseline resave cleared any saved selection, which would otherwise
   confine the scripted paint. One file had one.
 
