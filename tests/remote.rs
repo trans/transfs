@@ -79,8 +79,12 @@ fn two_writers_recover_forks_from_an_empty_store() {
     assert_eq!(second_ref.packs[0], first_ref.packs[0]);
     let first_pack = remote.get_pack(&first_ref.packs[0]).unwrap();
     let next_pack = remote.get_pack(&second_ref.packs[1]).unwrap();
-    assert!(!pack::decode(&first_pack).unwrap().is_empty());
-    assert!(!pack::decode(&next_pack).unwrap().is_empty());
+    let first_pack = pack::decode(&first_pack).unwrap();
+    let next_pack = pack::decode(&next_pack).unwrap();
+    assert!(!first_pack.objects.is_empty() && !next_pack.objects.is_empty());
+    // Each pack is rooted at the ledger root of the ref that added it.
+    assert_eq!(hex::encode(first_pack.roots[0]), first_ref.root);
+    assert_eq!(hex::encode(next_pack.roots[0]), second_ref.root);
 }
 
 #[test]
@@ -140,12 +144,14 @@ fn damaged_content_addressed_objects_are_replaced_from_verified_bytes() {
 
 #[test]
 fn a_pack_index_cannot_point_outside_its_object_bytes() {
-    let bytes = b"node".to_vec();
-    let identity: [u8; 32] = Sha256::digest(&bytes).into();
-    let mut packed = pack::encode(&[(identity, bytes.clone())]).unwrap();
-    assert_eq!(pack::decode(&packed).unwrap(), vec![(identity, bytes)]);
-    let index_offset = u64::from_be_bytes(packed[12..20].try_into().unwrap()) as usize;
-    packed[index_offset + 32..index_offset + 40].copy_from_slice(&0_u64.to_be_bytes());
+    let mut objects = merkle_champ::Objects::new();
+    let identity = objects.insert(b"node".to_vec());
+    let mut packed = pack::encode(&[identity], &objects).unwrap();
+    assert_eq!(pack::decode(&packed).unwrap().objects, objects);
+    // MCHPACK2: a 24-byte header, 32 bytes per root, then 48-byte index entries
+    // (identity, offset, length), little-endian. Point the only entry past the end.
+    let entry = 24 + 32;
+    packed[entry + 32..entry + 40].copy_from_slice(&u64::MAX.to_le_bytes());
     assert!(pack::decode(&packed).is_err());
 }
 

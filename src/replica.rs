@@ -121,15 +121,19 @@ pub fn publish(
             });
         }
     }
-    let new_objects: Vec<_> = objects
-        .iter()
-        .filter(|(id, _)| !prior_objects.contains(*id))
-        .map(|(id, bytes)| (*id, bytes.to_vec()))
-        .collect();
+    // The pack holds only nodes the remote lacks. Each is reachable from the
+    // new root through other new nodes: a node already published has only
+    // published children, so every new node's parent is new as well.
+    let mut new_objects = Objects::new();
+    for (id, bytes) in objects.iter() {
+        if !prior_objects.contains(id) {
+            new_objects.insert(bytes);
+        }
+    }
     if new_objects.is_empty() {
         return Err(Error::Storage("new root has no new CHAMP objects".into()));
     }
-    let pack_id = remote.put_pack(&pack::encode(&new_objects)?)?;
+    let pack_id = remote.put_pack(&pack::encode(&[root], &new_objects)?)?;
     let sequence = previous
         .as_ref()
         .map_or(Some(1), |old| old.value.sequence.checked_add(1))
@@ -396,7 +400,7 @@ fn latest_ref(remote: &dyn RemoteStore, writer: &str) -> Result<Option<Published
 fn load_objects(remote: &dyn RemoteStore, packs: &[String]) -> Result<Objects> {
     let mut objects = Objects::new();
     for pack_id in packs {
-        for (id, bytes) in pack::decode(&remote.get_pack(pack_id)?)? {
+        for (&id, bytes) in pack::decode(&remote.get_pack(pack_id)?)?.objects.iter() {
             if let Some(existing) = objects.get(&id) {
                 if existing != bytes {
                     return Err(Error::Storage(format!(

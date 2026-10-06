@@ -67,28 +67,37 @@ document ID -> (claim ID -> normalized format-2 JSON claim bytes)
 The inner map retains every causal claim, including superseded names and old
 content versions. Its entries can be unioned by claim ID across writers; the
 ordinary document fold then derives current names, tags, and version heads.
-The bytes of each CHAMP node are its identity preimage. transfs pins the
-unreleased merkle-champ 0.2 commit that supplies node save/load. The pack
-format lives in the separate `merkle-champ-pack` crate in the
-`merkle-champ` workspace, so other projects can reuse it without taking on
-transfs's document model.
+The bytes of each CHAMP node are its identity preimage. transfs pins an
+unreleased merkle-champ 0.2 commit, which supplies node save and load and the
+pack format.
 
-Pack format `MCHPACK1`:
+Packs use merkle-champ's MCHPACK2 format, specified in its `FORMAT.md`,
+section 11:
 
 ```text
-8 bytes   ASCII magic "MCHPACK1"
-4 bytes   object count, unsigned big-endian
-8 bytes   index offset, unsigned big-endian
-N bytes   concatenated CHAMP node bytes
-48 bytes per object, sorted by identity:
-           32-byte SHA-256 identity, 8-byte data offset, 8-byte length
+8 bytes    ASCII magic "MCHPACK2"
+4 bytes    flags, currently 0
+4 bytes    root count R
+8 bytes    object count N
+32R bytes  root identities
+48N bytes  index, sorted by identity: 32-byte identity, 8-byte offset, 8-byte length
+           object bytes, in canonical order, with no gaps
 ```
 
-The pack key hashes the complete pack. Readers check that hash, the bounds and
-order of every index entry, and each node hash before passing nodes to
-merkle-champ's canonical decoder. Each changed checkpoint writes a pack of
-nodes absent from that writer's previous published pack set. The writer ref
-retains the IDs of all packs needed to load its root.
+All integers are little-endian. The index comes right after the header, so a
+reader can open a pack with one ranged read and then fetch single objects. An
+object's references are the other pack members whose identity appears in its
+bytes; the data is in depth-first order over references from the roots, so
+equal contents always give byte-identical packs.
+
+Each changed checkpoint writes a pack holding the CHAMP nodes absent from that
+writer's previous packs, rooted at the new ledger root. Every new node is
+reachable from that root through other new nodes, because a node that was
+already published has only published children. The pack key hashes the
+complete pack. Readers check that hash, and decoding verifies the header, the
+index, each object's SHA-256, and the canonical order before nodes reach
+merkle-champ's canonical decoder. The writer ref retains the IDs of all packs
+needed to load its root.
 
 ## Writer refs and publication
 

@@ -373,17 +373,8 @@ dependencies = [
 [[package]]
 name = "merkle-champ"
 version = "0.2.0"
-source = "git+https://github.com/tabcomputing/merkle-champ?rev=03a4dcb7b92bbbbd61798e5ff5550966fd95d309#03a4dcb7b92bbbbd61798e5ff5550966fd95d309"
+source = "git+https://github.com/tabcomputing/merkle-champ?rev=058b2f0ce482b396a44ea9abc954b247c50992de#058b2f0ce482b396a44ea9abc954b247c50992de"
 dependencies = [
- "sha2",
-]
-
-[[package]]
-name = "merkle-champ-pack"
-version = "0.1.0"
-source = "git+https://github.com/tabcomputing/merkle-champ?rev=03a4dcb7b92bbbbd61798e5ff5550966fd95d309#03a4dcb7b92bbbbd61798e5ff5550966fd95d309"
-dependencies = [
- "merkle-champ",
  "sha2",
 ]
 
@@ -789,7 +780,6 @@ dependencies = [
  "hex",
  "libc",
  "merkle-champ",
- "merkle-champ-pack",
  "rand",
  "rusqlite",
  "serde",

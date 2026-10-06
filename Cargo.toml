@@ -17,8 +17,7 @@ native = ["dep:rusqlite", "dep:fuser", "dep:libc"]
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
 hex = "0.4.3"
-merkle-champ = { git = "https://github.com/tabcomputing/merkle-champ", rev = "03a4dcb7b92bbbbd61798e5ff5550966fd95d309" }
-merkle-champ-pack = { git = "https://github.com/tabcomputing/merkle-champ", rev = "03a4dcb7b92bbbbd61798e5ff5550966fd95d309" }
+merkle-champ = { git = "https://github.com/tabcomputing/merkle-champ", rev = "058b2f0ce482b396a44ea9abc954b247c50992de" }
 rand = "0.8.8"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

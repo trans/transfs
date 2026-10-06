@@ -1,11 +1,17 @@
-//! Compatibility wrapper for the shared merkle-champ pack layer.
+//! MCHPACK2 packs from merkle-champ (its FORMAT.md, section 11), with errors
+//! mapped to transfs's.
 use crate::{Error, Result};
-use merkle_champ::Identity;
+use merkle_champ::{Identity, Objects};
 
-pub fn encode(objects: &[(Identity, Vec<u8>)]) -> Result<Vec<u8>> {
-    merkle_champ_pack::encode(objects).map_err(|e| Error::Storage(e.to_string()))
+pub use merkle_champ::pack::Pack;
+
+/// A pack of `objects` rooted at `roots`. Every object must be reachable from
+/// the roots.
+pub fn encode(roots: &[Identity], objects: &Objects) -> Result<Vec<u8>> {
+    merkle_champ::pack::encode(roots, objects).map_err(|e| Error::Storage(e.to_string()))
 }
 
-pub fn decode(bytes: &[u8]) -> Result<Vec<(Identity, Vec<u8>)>> {
-    merkle_champ_pack::decode(bytes).map_err(|e| Error::Storage(e.to_string()))
+/// Decode and fully verify a pack.
+pub fn decode(bytes: &[u8]) -> Result<Pack> {
+    merkle_champ::pack::decode(bytes).map_err(|e| Error::Storage(e.to_string()))
 }
