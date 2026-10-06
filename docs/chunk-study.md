@@ -2,8 +2,8 @@
 
 > **Status:** in progress, 2026-10-05. This is gate 2 of the
 > [whitepaper's validation plan](data_centric_architecture_architecture_whitepaper.md#6-validation-plan-for-pandora-and-transfs).
-> One measurement is still to come: two snapshots of real, actively used
-> SQLite databases taken a day apart ([still to measure](#still-to-measure)).
+> Real SQLite use has been measured on one database; a second is still to come
+> ([still to measure](#still-to-measure)).
 
 transfs stores every version of a file as one complete blob. When two versions
 share most of their bytes, both copies are stored in full. Storing files as
@@ -139,19 +139,26 @@ costs more than they save.
 
 ### Real SQLite use
 
-Codex's conversation-history database, 307 MiB with 4 KiB pages, copied at
-02:46 and again at 15:47 on 2026-10-05. Codex was broken for most of that day,
-so little changed: 79 bytes in two pages.
+Codex's conversation-history database, about 307 MiB with 4 KiB pages, copied
+three times: at 02:46 and 15:47 on 2026-10-05, and at 00:25 the next night.
+Codex was broken for most of that day, so the first pair changed only 79 bytes
+in two pages. The second pair spans an evening of ordinary use, during which
+the database grew by 556 KiB.
 
 | | new chunk data | chunk list | total |
 |---|---:|---:|---:|
-| whole file | | | 307.1 MiB |
-| fixed 4 KiB | 8 KiB | 2.4 MiB | 2.4 MiB (0.8%) |
+| **broken day:** whole file | | | 307.1 MiB |
+| fixed 4 KiB (one page) | 8 KiB | 2.4 MiB | 2.4 MiB (0.8%) |
 | FastCDC 4 KiB | 11 KiB | 1.9 MiB | 1.9 MiB (0.6%) |
+| **evening of use:** whole file | | | 307.7 MiB |
+| fixed 4 KiB (one page) | 0.7 MiB | 2.4 MiB | 3.1 MiB (1.0%) |
+| FastCDC 8 KiB | 1.1 MiB | 0.9 MiB | 2.0 MiB (0.7%) |
 
-Almost all of the cost is the flat chunk list: about 78,000 entries written
-again to record two changed pages. A tree-shaped list would have rewritten a
-few nodes. A pair spanning a day of ordinary use is still to come.
+A conversation history mostly appends, so an evening's work touched 171 of
+about 78,000 pages. With page-sized chunks the new data is 0.7 MiB, 0.23% of
+the file. Almost all of the rest is the flat chunk list, written again in full
+for every version; a tree-shaped list would rewrite a few nodes instead, so the
+real cost of a version is close to its new data alone.
 
 ### PNG and WebP exports
 
@@ -223,11 +230,9 @@ Two ways of cutting chunks, chosen by file type, with one way of storing them:
 
 ## Still to measure
 
-- **A day of real SQLite use.** Two working databases (Codex's conversation
-  history, 307 MiB, and its logs, 121 MiB) were copied on 2026-10-05 at 02:46.
-  The first later copy caught a day on which Codex was broken
-  ([above](#real-sqlite-use)). A copy after ordinary use will show what real
-  work changes, which no generated workload can.
+- **Codex's log database** (121 MiB) was in use at each copy after the first,
+  with uncommitted changes in its `-wal` file, so it could not be copied safely
+  yet.
 - **Audio and video** were not tested.
 
 ## Limits
