@@ -22,7 +22,7 @@ dictionary. Its new version costs 5.9 MiB instead of another 120 MiB.
 | SQLite database | starts with `SQLite format 3\0` | fixed, one page each; page size from bytes 16–17 | zstd level 3; large databases also get their own dictionary | 0.9–7.4% | 30–43% |
 | GIMP image (XCF) | starts with `gimp xcf ` | FastCDC, 8 KiB average | zstd level 3, no dictionary | 1.0–12% for local edits; about 75% when a whole layer changes | 79% |
 | PNG image | starts with `89 50 4E 47 0D 0A 1A 0A` | FastCDC, 8 KiB average | none: already compressed | about 68% for an edit halfway down; depends on where the edit is | about 100% |
-| WebP image | `RIFF`, then `WEBP` at byte 8 | FastCDC, 8 KiB average | none: already compressed | about 100% | about 100% |
+| WebP image, and other already-compressed media | for WebP: `RIFF`, then `WEBP` at byte 8 | none: one whole blob, which stays a real file | none: already compressed | 100% | 100% |
 | anything else | – | FastCDC, 8 KiB average | zstd level 3; stored raw when that doesn't shrink it | *not measured* | *not measured* |
 | small files | under 32 KiB | none: one whole blob | zstd level 3 when it shrinks the file | *not measured* | *not measured* |
 
@@ -56,6 +56,10 @@ every version.
   chunk names it (zstd records a dictionary's id in every frame).
 - **A version's chunk list is a merkle-champ `Sequence`** of chunk identities
   and lengths, so an edit to a large file rewrites only a few nodes of its list.
+  [Chunked storage](chunked-storage.md) describes the whole design.
+- **Already-compressed media stay whole blobs.** Chunking saves them nothing,
+  and a whole blob is a real file, so programs that open files by path (such as
+  DataDungeon's `resolve` and Infocomic's image routes) keep working.
 
 ## Compute cost
 
