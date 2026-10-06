@@ -10,3 +10,4 @@ publish = false
 [dependencies]
 fastcdc = "3.1"
 sha2 = "0.10.9"
+zstd = "0.13"

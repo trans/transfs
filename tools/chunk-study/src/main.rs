@@ -7,6 +7,8 @@
 //!   the whole set costs to keep.
 //! - `pairs LABEL OLD NEW [OLD NEW ...]` gives each pair a fresh store holding
 //!   OLD, then reports what NEW adds. Rows are summed over the pairs.
+//! - `zpairs LABEL OLD NEW [OLD NEW ...]` is `pairs` with each stored chunk
+//!   compressed by zstd (see `compress.rs`).
 //!
 //! Whole-file storage is the baseline: one object per distinct file, as
 //! transfs stores blobs today. Chunked methods also pay for a pack index entry
@@ -14,6 +16,8 @@
 //! into 4 MiB packs.
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, env, fs, process, time::Instant};
+
+mod compress;
 
 const PACK_TARGET: u64 = 4 << 20;
 /// A pack index entry: 32-byte identity, 8-byte offset, 8-byte length.
@@ -148,13 +152,17 @@ fn main() {
     let (mode, label, files) = match args.as_slice() {
         [mode, label, files @ ..] if !files.is_empty() => (mode.as_str(), label, files),
         _ => {
-            eprintln!("usage: chunk-study corpus LABEL FILE...\n       chunk-study pairs LABEL OLD NEW [OLD NEW ...]");
+            eprintln!("usage: chunk-study corpus LABEL FILE...\n       chunk-study pairs|zpairs LABEL OLD NEW [OLD NEW ...]");
             process::exit(2);
         }
     };
-    if mode == "pairs" && files.len() % 2 != 0 {
-        eprintln!("pairs needs an even number of files");
+    if mode != "corpus" && files.len() % 2 != 0 {
+        eprintln!("{mode} needs an even number of files");
         process::exit(2);
+    }
+    if mode == "zpairs" {
+        compress::zpairs(label, files);
+        return;
     }
     if mode != "corpus" && mode != "pairs" {
         eprintln!("unknown mode {mode}");

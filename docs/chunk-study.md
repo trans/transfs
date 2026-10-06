@@ -3,7 +3,8 @@
 > **Status:** 2026-10-06. This is gate 2 of the
 > [whitepaper's validation plan](data_centric_architecture_architecture_whitepaper.md#6-validation-plan-for-pandora-and-transfs).
 > Measured on GIMP files, generated and real SQLite databases, and PNG and
-> WebP exports; audio and video are [still to measure](#still-to-measure).
+> WebP exports, with and without compression; audio and video are
+> [still to measure](#still-to-measure).
 
 transfs stores every version of a file as one complete blob. When two versions
 share most of their bytes, both copies are stored in full. Storing files as
@@ -31,6 +32,9 @@ of cutting chunks works for each.
   database that reuses its pages 19%. Content-defined chunks cost up to 2.5 times as much.
 - **PNG exports keep the part of the file before the first change; WebP exports
   share nothing.**
+- **Compressing each chunk with zstd and a dictionary roughly halves what
+  SQLite versions cost again** (generated database 4.5%, Codex's logs 4.9%),
+  and trims GIMP versions a little.
 - **An edit that changes every pixel saves nothing**, and chunking adds about
   1.5% on top of a whole-file copy.
 
@@ -43,6 +47,9 @@ cutting chunks. It only reads its input. It has two modes:
   whole set costs. This measures sharing between different files.
 - `pairs LABEL OLD NEW ...` stores OLD, then reports what NEW adds. This
   measures what a new version costs. Rows are summed over all pairs.
+- `zpairs LABEL OLD NEW ...` is `pairs` with every stored chunk compressed by
+  zstd ([compression](#compression)). `ZSTD_LEVEL` and `ZSTD_DICT_KIB` set
+  the level (default 3) and dictionary size (default 110).
 
 It compares ten ways of storing a file:
 
@@ -184,6 +191,86 @@ shared part starts at the beginning of the file, fixed and content-defined
 chunks do equally well. WebP compresses the whole image together and shares
 nothing.
 
+## Compression
+
+Chunking stores less; compression then shrinks what is stored. The two combine
+if each chunk is compressed on its own, after chunking, as Borg and restic do.
+A chunk's identity stays the hash of its uncompressed bytes, so identical
+chunks still match, and compressing differently later changes no identity.
+
+For example, the new version of Codex's log database after a day costs 120.6
+MiB stored whole, 27.5 MiB compressed as one stream with zstd, 22.9 MiB as
+page-sized chunks, and 5.9 MiB as page-sized chunks each compressed with zstd
+and a dictionary.
+
+The `zpairs` mode of the tool compresses every new chunk separately with zstd
+at level 3, plainly and with a 110 KiB dictionary trained on the pair's old
+version. A dictionary is a sample of typical content that the compressor
+starts from, so a small chunk compresses nearly as well as if it were part of
+a large file. The baseline is the whole new file compressed as one stream:
+what compression gets without chunking. Percentages are of the new version
+stored whole and uncompressed, as before.
+
+| new version | best chunking | chunks, uncompressed | chunks, zstd + dictionary | whole file, zstd |
+|---|---|---:|---:|---:|
+| XCF small stroke | FastCDC 8 KiB | 2.8% | **2.2%** | 77.2% |
+| XCF long vertical stroke | FastCDC 8 KiB | 14.5% | **11.8%** | 77.0% |
+| XCF new layer | FastCDC 8 KiB | 2.0% | **1.1%** | 76.7% |
+| XCF colour change on the main layer | FastCDC 8 KiB | 100.6% | 75.3%¹ | 72.5% |
+| SQLite (generated), ordinary use | page-sized | 8.8% | **4.5%** | 38.5% |
+| SQLite (generated), bulk insert | page-sized | 15.3% | **7.4%** | 38.5% |
+| Codex logs, a day | page-sized | 19.0% | **4.9%** | 22.8% |
+| Codex conversation history, overnight | page-sized | 1.3% | **0.9%** | 28.9% |
+| PNG small stroke | FastCDC 8 KiB | 67.6% | 67.3% | 100% |
+| WebP small stroke | FastCDC 8 KiB | 100.8% | 100.3% | 100% |
+
+¹ zstd without the dictionary: 74.6%. When every tile changes, chunks compress
+about as well as the whole file, and chunking adds only its bookkeeping.
+
+For the conversation history, 0.8% of its 0.9% is the flat chunk list, which
+compression cannot shrink (it is hashes) and a tree-shaped list would mostly
+avoid.
+
+### A file stored fresh
+
+A small chunk compresses worse on its own than as part of a large file,
+because the compressor starts each one with no history. This shows when a
+file is stored with nothing to share, as on its first version:
+
+| stored fresh | whole file, zstd | chunks, zstd | chunks, zstd + dictionary |
+|---|---:|---:|---:|
+| XCF (FastCDC 8 KiB) | 77.2% | 79.2% | 77.0% |
+| SQLite, generated (page-sized) | 38.5% | 57.7% | 42.8% |
+| Codex logs (page-sized) | 22.8% | 39.5% | 30.1% |
+| Codex conversation history (page-sized) | 28.9% | 43.1% | 39.7% |
+| PNG (FastCDC 8 KiB) | 100% | 100.7% | 97.2% |
+
+XCF loses nothing: its content is already arranged in independent tiles. For
+SQLite the dictionary closes most of the gap, and the gap is paid once: every
+later version is far cheaper chunked than compressed whole (0.9–4.9% against
+22.8–38.5% for the databases above).
+
+### Dictionary size and compression level
+
+A 110 KiB dictionary, zstd's usual size, did clearly better than 16 KiB: on
+Codex's logs, 4.9% against 5.5% per version and 30.1% against 33.4% fresh. A
+dictionary is stored once per kind of file, so its size costs nothing that
+matters.
+
+Higher zstd levels compress a little better and run much slower (one core):
+
+| zstd level | SQLite fresh | XCF fresh | speed |
+|---|---:|---:|---:|
+| 1 | 50.8% | 79.3% | 410–550 MB/s |
+| **3** | **42.8%** | **77.0%** | **300–330 MB/s** |
+| 9 | 38.9% | 74.1% | 73–80 MB/s |
+| 19 | 38.0% | 72.4% | 14–15 MB/s |
+
+Version costs barely change with the level (SQLite 4.5% at level 3, 4.0% at
+level 19). Level 3 keeps writes fast. Because a chunk's identity is its
+uncompressed hash, rarely used chunks can be recompressed at a high level
+later, in the background, without changing anything that refers to them.
+
 ## What this means for transfs
 
 Two ways of cutting chunks, chosen by file type, with one way of storing them:
@@ -228,10 +315,14 @@ Two ways of cutting chunks, chosen by file type, with one way of storing them:
    entries, and equal lists always have equal identities. Branches will carry
    each child's byte length, so finding the chunk that holds a given byte is one
    walk down the tree.
-4. **No RRB tree is needed for storage.** Content-defined chunks already keep
+4. **Compress each chunk with zstd at level 3, using a dictionary of about
+   110 KiB per kind of file.** Skip compression for formats that are already
+   compressed, such as WebP. The per-type settings are collected in
+   [file types](file-types.md).
+5. **No RRB tree is needed for storage.** Content-defined chunks already keep
    an edit's cost local. An RRB tree would only be needed for an editor that
    splices bytes in place.
-5. **Small files** were not measured. Below some size the chunk list costs more
+6. **Small files** were not measured. Below some size the chunk list costs more
    than chunking can save, so they should stay whole blobs; the threshold is
    still to be found.
 
@@ -245,6 +336,9 @@ Two ways of cutting chunks, chosen by file type, with one way of storing them:
   one project. Real editing sessions mix several kinds of edit before saving.
 - The generated SQLite database's schema and access pattern are guesses at an
   application's. The real databases are two, both from one application.
+- Each dictionary was trained on the previous version of the same file, the
+  best case. A store would train one dictionary per kind of file from other
+  files, which may compress somewhat less.
 - Each baseline resave cleared any saved selection, which would otherwise
   confine the scripted paint. One file had one.
 
@@ -272,6 +366,7 @@ XCF_OUT=~/.local/share/transfs-chunk-study/xcf-edits \
 # Measure a pair
 D=~/.local/share/transfs-chunk-study/sqlite
 target/release/chunk-study pairs "SQLite: ordinary use" $D/base.sqlite $D/updates.sqlite
+target/release/chunk-study zpairs "SQLite: ordinary use" $D/base.sqlite $D/updates.sqlite
 ```
 
 `sources.txt` lists one XCF path per line; the run above used one path for each
