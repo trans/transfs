@@ -1,6 +1,7 @@
 # Chunked storage
 
-> **Status:** proposal for review, 2026-10-06. Nothing here is built. It turns
+> **Status:** writing and reading chunked versions is built (step 2 of
+> [building it](#building-it), 2026-10-07); the rest is still a proposal. It turns
 > the [chunk study](chunk-study.md) and the [file-type table](file-types.md)
 > into a storage design. The two merkle-champ pieces it needs are built:
 > loading a stored `Sequence` (`ad0797e`) and compressed pack members
@@ -71,7 +72,7 @@ for the images they serve, with no change to either.
   .transfs/docs/<hh>/<doc-id>.log      claim logs, as today
   .transfs/packs/<pack-hash>           chunks and chunk-list nodes
   .transfs/reps/<hh>/<H>/<rep-id>      representation records
-  .transfs/index.db                    index, now also: object → pack, offset
+  .transfs/store.json                  store settings (chunking: auto or off)
 ```
 
 - **Chunks and list nodes live in packs**, not one file per chunk. A terabyte
@@ -83,9 +84,16 @@ for the images they serve, with no change to either.
   content hash they describe, as the [whitepaper](data_centric_architecture_architecture_whitepaper.md)
   proposes for remotes (`reps/<H>/<rep-id>`). A content hash may have more than
   one record, for example a chunked one and, later, a repacked one.
-- **The index gains a table** from object identity to pack, offset and length.
-  Like the rest of `index.db` it is a cache: rebuilding it reads each pack's
-  index, which sits at the start of the pack.
+- **Where each object lives** (its pack, offset and length) is rebuilt from
+  the packs' own indexes, which sit at the start of each pack, the first time
+  a store needs it. It is not kept in `index.db`, which exists only in the
+  native build, because reading a chunked file must also work in WASM. If
+  opening a large store gets slow, the map can be cached later.
+- **A simple store** keeps every file a whole blob: `transfs config chunking
+  off` writes `"chunking": "off"` to `.transfs/store.json`, and new versions
+  are stored whole from then on. A store without the file chunks (`auto`).
+  The setting lives in the store so every program that opens it writes it the
+  same way; it is not published to remotes.
 
 ### The representation record
 
@@ -319,10 +327,12 @@ In slices, each usable on its own:
 
 1. **merkle-champ:** loading a stored `Sequence`, and compressed pack members.
    Done (`ad0797e`, `6b1197c`).
-2. **Write and read:** the chunkers, representation records, local packs and
-   the object index; `add`, `addversion`, `cat` and `read_version` on chunked
-   files; size and type in the index; `check`. Files under the threshold and
-   already-compressed media keep going to whole blobs.
+2. **Write and read.** Done, 2026-10-07: the chunkers (FastCDC pinned with
+   golden values, SQLite pages), representation records, local packs with
+   compressed chunks, the store setting, chunked `add`, `addversion`, `cat` and
+   `read_version`, size and type in the index, the mount (correct ranged
+   reads, without a chunk cache yet), `check` and `check --deep`. Until step 4,
+   `publish` rebuilds chunked versions and uploads them as whole blobs.
 3. **The mount:** ranged reads through the chunk list, with a chunk cache.
 4. **Publish and recover:** records and packs to and from a remote, and
    publish state kept per remote, so one store can publish to several.

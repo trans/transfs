@@ -100,11 +100,14 @@ pub fn publish(
     };
     let prior_objects: BTreeSet<Identity> = objects.iter().map(|(id, _)| *id).collect();
 
+    // Remotes hold whole blobs. A chunked version is rebuilt (and checked
+    // against its hash) before upload, until remotes learn representation
+    // records and packs (docs/chunked-storage.md, building step 4).
     for hash in &blobs {
         let bytes = library
-            .cas
-            .get(hash)?
-            .ok_or_else(|| Error::Storage(format!("missing local blob {hash}")))?;
+            .content
+            .read(hash)?
+            .ok_or_else(|| Error::Storage(format!("missing local content {hash}")))?;
         remote.put_blob(hash, &bytes)?;
     }
 

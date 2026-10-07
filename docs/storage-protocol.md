@@ -147,3 +147,7 @@ larger blobs or packs on it. Remotes provide no authentication or writer roster 
 can publish to only one remote: `writer.json` holds one last-published ref, so
 publishing to a second remote is refused as if another device owned the writer.
 Publishing to several remotes for redundancy needs publish state per remote.
+A working store may keep versions as chunks (`docs/chunked-storage.md`), but
+remotes still hold whole blobs: `publish` rebuilds a chunked version, checks it
+against its hash and uploads it as a blob, until representation records and
+packs reach remotes.

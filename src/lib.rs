@@ -2,13 +2,19 @@
 pub mod cas;
 pub mod causal;
 pub mod check;
+pub mod chunker;
 pub mod claim;
+pub mod config;
+pub mod content;
 pub mod document;
+pub mod filetype;
 pub mod library;
 pub mod log;
+pub mod objects;
 pub mod pack;
 pub mod query;
 pub mod remote;
+pub mod rep;
 pub mod replica;
 mod writer;
 

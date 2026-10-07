@@ -2,6 +2,8 @@ use crate::{
     cas::Cas,
     causal::mint_nonce,
     claim::Claim,
+    config::StoreConfig,
+    content::Content,
     document::{normalize_tag, Document},
     log::Log,
     Error, Result,
@@ -9,7 +11,6 @@ use crate::{
 use chrono::{DateTime, Utc};
 use std::{
     collections::BTreeSet,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -17,6 +18,8 @@ use std::{
 pub struct Library {
     pub root: PathBuf,
     pub cas: Cas,
+    /// Versions' bytes, as whole blobs or chunks.
+    pub content: Content,
 }
 
 impl Library {
@@ -24,8 +27,15 @@ impl Library {
         let root = root.into();
         Self {
             cas: Cas::new(&root),
+            content: Content::new(&root),
             root,
         }
+    }
+
+    /// Stores a file's bytes as the store's settings say, returning its hash.
+    fn put_file(&self, path: &Path) -> Result<String> {
+        let chunking = StoreConfig::load(&self.root)?.chunking;
+        self.content.put_file(path, chunking)
     }
 
     fn append_and_load(&self, id: &str, claims: &[Claim]) -> Result<Document> {
@@ -38,7 +48,7 @@ impl Library {
     }
 
     pub fn add_at(&self, path: &Path, name: Option<&str>, ts: DateTime<Utc>) -> Result<Document> {
-        let hash = self.cas.put(&fs::read(path)?)?;
+        let hash = self.put_file(path)?;
         let create = Claim::mint(ts);
         let id = create.doc_id().expect("mint returns create");
         let label = name.map(str::to_owned).unwrap_or_else(|| {
@@ -140,7 +150,7 @@ impl Library {
             }
             resolved.push(matches[0].id.clone());
         }
-        let hash = self.cas.put(&fs::read(path)?)?;
+        let hash = self.put_file(path)?;
         let claim = Claim::Version {
             doc: doc.id.clone(),
             nonce: mint_nonce(),
@@ -261,7 +271,7 @@ impl Library {
 
     pub fn read(&self, doc: &Document) -> Result<Option<Vec<u8>>> {
         match doc.head() {
-            Some(hash) => self.cas.get(hash),
+            Some(hash) => self.content.read(hash),
             None if doc.heads.is_empty() => Ok(None),
             None => Err(Error::AmbiguousHead {
                 id: doc.id.clone(),
@@ -282,7 +292,7 @@ impl Library {
                 matches.len()
             )));
         }
-        self.cas.get(&matches[0].hash)
+        self.content.read(&matches[0].hash)
     }
 
     pub fn documents(&self) -> Result<Vec<Document>> {

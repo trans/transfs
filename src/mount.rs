@@ -2,8 +2,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{CString, OsStr},
-    fs::File,
-    os::unix::{ffi::OsStrExt, fs::FileExt},
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, SystemTime},
@@ -16,7 +15,7 @@ use fuser::{
 };
 
 use crate::{
-    cas::Cas,
+    content::Content,
     index::{Index, Row},
     query, Result,
 };
@@ -33,17 +32,17 @@ pub enum Node {
     },
 }
 
-/// Keeps the query grammar, disambiguation, and blob resolution outside FUSE.
+/// Keeps the query grammar, disambiguation, and content resolution outside FUSE.
 pub struct MountView {
     index: Mutex<Index>,
-    cas: Cas,
+    content: Content,
 }
 
 impl MountView {
     pub fn new(root: &Path) -> Result<Self> {
         Ok(Self {
             index: Mutex::new(Index::open(root)?),
-            cas: Cas::new(root),
+            content: Content::new(root),
         })
     }
 
@@ -105,12 +104,14 @@ impl MountView {
         }
     }
 
+    /// Up to `size` bytes at `offset`, from a whole blob or from chunks.
     pub fn read(&self, hash: &str, offset: u64, size: u32) -> std::io::Result<Vec<u8>> {
-        let file = File::open(self.cas.path_for(hash))?;
-        let mut bytes = vec![0; size as usize];
-        let count = file.read_at(&mut bytes, offset)?;
-        bytes.truncate(count);
-        Ok(bytes)
+        self.content
+            .read_at(hash, offset, u64::from(size))
+            .map_err(|e| match e {
+                crate::Error::Io(e) => e,
+                e => std::io::Error::other(e.to_string()),
+            })
     }
 
     pub fn document_count(&self) -> Result<u64> {

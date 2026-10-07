@@ -69,13 +69,29 @@ just fuse-unmount
 `just --list` also shows the individual `fuse-list`, `fuse-read`, `fuse-stat`,
 `fuse-forks`, `fuse-time`, and `fuse-readonly` checks.
 
+Files of 32 KiB or more are stored as chunks: FastCDC chunks of about 8 KiB,
+or one chunk per page for SQLite databases, each compressed with zstd. A new
+version stores only the chunks the store doesn't already have. Smaller files
+and already-compressed media (WebP, JPEG, video, archives) stay whole blobs.
+`show` says how each version is stored. To keep every file a whole blob:
+
+```sh
+cargo run -- --store demo/store config chunking off   # or auto, the default
+cargo run -- --store demo/store check --deep          # also rebuild chunked versions
+```
+
+See [chunked storage](docs/chunked-storage.md) and [file types](docs/file-types.md).
+
 The store layout is:
 
 ```text
 <store>/
-  blobs/<hh>/<sha256>
+  blobs/<hh>/<sha256>                    whole files
   .transfs/docs/<hh>/<document-id>.log
+  .transfs/packs/<pack-hash>             chunks and chunk lists
+  .transfs/reps/<hh>/<sha256>/<id>.json  how chunked content is stored
   .transfs/index.db
+  .transfs/store.json                    store settings
   .transfs/writer.json
 ```
 

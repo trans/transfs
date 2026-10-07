@@ -1,8 +1,8 @@
 # File types
 
-> **Status:** proposed, 2026-10-06. Nothing here is built yet. The numbers come
-> from the [chunk study](chunk-study.md); rows marked *not measured* are
-> defaults to check.
+> **Status:** built for the rows below except dictionaries, 2026-10-07. The
+> numbers come from the [chunk study](chunk-study.md); rows marked *not
+> measured* are defaults to check.
 
 transfs stores a file's bytes as chunks, and the best way to cut and compress
 them depends on what kind of file it is. A SQLite database changes in whole

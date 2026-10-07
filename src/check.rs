@@ -1,4 +1,13 @@
-use crate::{cas::Cas, claim::Claim, document::Document, log::Log, Error, Result};
+use crate::{
+    cas::Cas,
+    claim::Claim,
+    content::Content,
+    document::Document,
+    log::Log,
+    objects::{ObjectStore, MAX_OBJECT},
+    rep, Error, Result,
+};
+use merkle_champ::pack::{self, ReadOptions};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
@@ -16,6 +25,9 @@ pub struct Issue {
 pub struct CheckResult {
     pub documents: usize,
     pub blobs: usize,
+    /// Content stored as chunks, and the packs holding them.
+    pub chunked: usize,
+    pub packs: usize,
     pub warnings: Vec<Issue>,
     pub errors: Vec<Issue>,
 }
@@ -26,10 +38,18 @@ impl CheckResult {
 }
 
 pub fn check(root: &Path) -> Result<CheckResult> {
+    check_with(root, false)
+}
+
+/// `deep` also rebuilds every chunked version and compares it with its hash.
+pub fn check_with(root: &Path, deep: bool) -> Result<CheckResult> {
     let cas = Cas::new(root);
+    let content = Content::new(root);
     let mut result = CheckResult {
         documents: 0,
         blobs: 0,
+        chunked: 0,
+        packs: 0,
         warnings: vec![],
         errors: vec![],
     };
@@ -102,10 +122,12 @@ pub fn check(root: &Path) -> Result<CheckResult> {
                                 path: path.clone(),
                                 message: format!("version references invalid blob hash {hash:?}"),
                             });
-                        } else if !cas.exists(hash) {
+                        } else if !content.exists(hash)? {
                             result.errors.push(Issue {
                                 path: path.clone(),
-                                message: format!("version references missing blob {hash}"),
+                                message: format!(
+                                    "version references missing blob or chunks {hash}"
+                                ),
                             });
                         }
                     }
@@ -158,7 +180,75 @@ pub fn check(root: &Path) -> Result<CheckResult> {
             });
         }
     }
+    check_chunks(
+        root,
+        &content,
+        deep,
+        &referenced,
+        unreadable_logs,
+        &mut result,
+    )?;
     Ok(result)
+}
+
+/// Packs, representation records and chunk lists.
+fn check_chunks(
+    root: &Path,
+    content: &Content,
+    deep: bool,
+    referenced: &HashSet<String>,
+    unreadable_logs: bool,
+    result: &mut CheckResult,
+) -> Result<()> {
+    let mut objects = ObjectStore::new(root);
+    let mut named = HashSet::new();
+    for hash in rep::contents(root)? {
+        let path = rep::reps_dir(root).join(&hash[..2]).join(&hash);
+        result.chunked += 1;
+        match content.verify_chunked(&hash, deep) {
+            Ok(packs) => named.extend(packs),
+            Err(e) => result.errors.push(Issue {
+                path: path.clone(),
+                message: format!("chunked content {hash}: {e}"),
+            }),
+        }
+        if !unreadable_logs && !referenced.contains(&hash) {
+            result.warnings.push(Issue {
+                path,
+                message: "orphan representation is not referenced by any version claim".into(),
+            });
+        }
+    }
+    let options = ReadOptions {
+        max_decoded: MAX_OBJECT,
+        trust_checksums: false,
+    };
+    for name in objects.pack_names()? {
+        result.packs += 1;
+        let path = objects.pack_path(&name);
+        let bytes = fs::read(&path)?;
+        if hex::encode(Sha256::digest(&bytes)) != name {
+            result.errors.push(Issue {
+                path,
+                message: "pack hash mismatch".into(),
+            });
+            continue;
+        }
+        if let Err(e) = pack::decode_with(&bytes, &options) {
+            result.errors.push(Issue {
+                path,
+                message: format!("damaged pack: {e}"),
+            });
+            continue;
+        }
+        if !unreadable_logs && !named.contains(&name) {
+            result.warnings.push(Issue {
+                path,
+                message: "orphan pack is not named by any representation".into(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn valid_hash(hash: &str) -> bool {

@@ -1,7 +1,7 @@
 //! Disposable native SQLite index. The claim log and CAS remain the source of truth.
 use crate::{
-    cas::Cas,
     claim::format_ts,
+    content::Content,
     document::Document,
     log::{Log, TornTail},
     Error, Result,
@@ -20,6 +20,7 @@ unsafe extern "C" {
     fn magic_open(flags: c_int) -> *mut c_void;
     fn magic_load(cookie: *mut c_void, filename: *const c_char) -> c_int;
     fn magic_file(cookie: *mut c_void, filename: *const c_char) -> *const c_char;
+    fn magic_buffer(cookie: *mut c_void, buffer: *const c_void, length: usize) -> *const c_char;
     fn magic_error(cookie: *mut c_void) -> *const c_char;
     fn magic_close(cookie: *mut c_void);
 }
@@ -52,7 +53,12 @@ impl Magic {
     }
     fn file(&self, path: &Path) -> Option<String> {
         let name = CString::new(path.to_string_lossy().as_bytes()).ok()?;
-        let ptr = unsafe { magic_file(self.0, name.as_ptr()) };
+        Self::answer(unsafe { magic_file(self.0, name.as_ptr()) })
+    }
+    fn buffer(&self, bytes: &[u8]) -> Option<String> {
+        Self::answer(unsafe { magic_buffer(self.0, bytes.as_ptr().cast(), bytes.len()) })
+    }
+    fn answer(ptr: *const c_char) -> Option<String> {
         if ptr.is_null() {
             None
         } else {
@@ -102,7 +108,7 @@ pub struct Walk {
 
 pub struct Index {
     root: PathBuf,
-    cas: Cas,
+    content: Content,
     conn: Connection,
     magic: Magic,
     pub rebuild_errors: Vec<String>,
@@ -124,7 +130,7 @@ impl Index {
         let conn = Connection::open(db_path)?;
         let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let mut this = Self {
-            cas: Cas::new(&root),
+            content: Content::new(&root),
             root,
             conn,
             magic: Magic::open()?,
@@ -211,7 +217,7 @@ impl Index {
                         self.rebuild_warnings.push(tail);
                     }
                     match Document::fold(&id, &read.claims) {
-                        Ok(doc) => upsert(&tx, &self.cas, &self.magic, &doc)?,
+                        Ok(doc) => upsert(&tx, &self.content, &self.magic, &doc)?,
                         Err(e) => self.rebuild_errors.push(format!("{id}: {e}")),
                     }
                 }
@@ -231,7 +237,7 @@ impl Index {
     }
     pub fn index_document(&mut self, doc: &Document) -> Result<()> {
         let tx = self.conn.transaction()?;
-        upsert(&tx, &self.cas, &self.magic, doc)?;
+        upsert(&tx, &self.content, &self.magic, doc)?;
         tx.commit()?;
         Ok(())
     }
@@ -485,7 +491,7 @@ impl Index {
     }
 }
 
-fn upsert(conn: &Connection, cas: &Cas, magic: &Magic, doc: &Document) -> Result<()> {
+fn upsert(conn: &Connection, content: &Content, magic: &Magic, doc: &Document) -> Result<()> {
     for (table, col) in [
         ("documents", "id"),
         ("versions", "doc_id"),
@@ -498,8 +504,8 @@ fn upsert(conn: &Connection, cas: &Cas, magic: &Magic, doc: &Document) -> Result
         conn.execute(&format!("DELETE FROM {table} WHERE {col}=?"), [&doc.id])?;
     }
     let head = doc.head();
-    let head_size = head.and_then(|hash| blob_size(cas, hash));
-    let head_type = head.and_then(|hash| type_for(cas, magic, hash));
+    let head_size = head.and_then(|hash| blob_size(content, hash));
+    let head_type = head.and_then(|hash| type_for(content, magic, hash));
     let added = format_ts(doc.created_at);
     let content_date = doc
         .versions
@@ -524,8 +530,8 @@ fn upsert(conn: &Connection, cas: &Cas, magic: &Magic, doc: &Document) -> Result
                 doc.id,
                 head.id,
                 head.hash,
-                blob_size(cas, &head.hash),
-                type_for(cas, magic, &head.hash),
+                blob_size(content, &head.hash),
+                type_for(content, magic, &head.hash),
                 format_ts(head.ts)
             ],
         )?;
@@ -539,8 +545,8 @@ fn upsert(conn: &Connection, cas: &Cas, magic: &Magic, doc: &Document) -> Result
                 version.hash,
                 serde_json::to_string(&version.parents).expect("parents serialize"),
                 format_ts(version.ts),
-                blob_size(cas, &version.hash),
-                type_for(cas, magic, &version.hash)
+                blob_size(content, &version.hash),
+                type_for(content, magic, &version.hash)
             ],
         )?;
         conn.execute(
@@ -550,7 +556,7 @@ fn upsert(conn: &Connection, cas: &Cas, magic: &Magic, doc: &Document) -> Result
     }
     let mut paths = BTreeSet::new();
     for head in &doc.heads {
-        if let Some(mime) = type_for(cas, magic, &head.hash) {
+        if let Some(mime) = type_for(content, magic, &head.hash) {
             paths.insert(format!("type/{mime}"));
         }
     }
@@ -572,14 +578,20 @@ fn upsert(conn: &Connection, cas: &Cas, magic: &Magic, doc: &Document) -> Result
     Ok(())
 }
 
-fn blob_size(cas: &Cas, hash: &str) -> Option<i64> {
-    fs::metadata(cas.path_for(hash))
-        .ok()
-        .map(|meta| meta.len() as i64)
+fn blob_size(content: &Content, hash: &str) -> Option<i64> {
+    content.size(hash).ok().flatten().map(|size| size as i64)
 }
-fn type_for(cas: &Cas, magic: &Magic, hash: &str) -> Option<String> {
-    let path = cas.path_for(hash);
-    path.exists().then(|| magic.file(&path)).flatten()
+/// A whole blob is recognized from its file; chunked content from its first
+/// 64 KiB, which is all libmagic needs.
+fn type_for(content: &Content, magic: &Magic, hash: &str) -> Option<String> {
+    let path = content.cas().path_for(hash);
+    if path.exists() {
+        return magic.file(&path);
+    }
+    if !content.exists(hash).ok()? {
+        return None;
+    }
+    magic.buffer(&content.head(hash, 64 << 10).ok()?)
 }
 fn escape_like(s: &str) -> String {
     s.replace('\\', "\\\\")

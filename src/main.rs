@@ -5,8 +5,10 @@ use std::{
     path::{Path, PathBuf},
 };
 use transfs::{
-    check::check,
+    check::check_with,
     claim::format_ts,
+    config::{Chunking, StoreConfig},
+    content::Stored,
     document::Document,
     index::{Index, Row},
     library::Library,
@@ -43,7 +45,7 @@ fn run() -> CliResult<i32> {
         env::current_dir()?.join(root)
     };
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
-        println!("transfs [--store DIR] <command> [args]\n\ncommands: add addversion rename tag untag set list find reindex check cat show versions mount publish recover fork-writer remote-check\n\naddversion ID FILE [--parents VERSION_ID,...]\ncat ID [VERSION_ID]\npublish REMOTE_DIR [LABEL]\nrecover REMOTE_DIR  (into a store path that does not exist)\nfork-writer [LABEL]  (give a copied store its own writer ID)\nremote-check REMOTE_DIR");
+        println!("transfs [--store DIR] <command> [args]\n\ncommands: add addversion rename tag untag set list find reindex check cat show versions mount publish recover fork-writer remote-check config\n\naddversion ID FILE [--parents VERSION_ID,...]\ncat ID [VERSION_ID]\ncheck [--deep]  (--deep rebuilds every chunked version and checks its hash)\nconfig [chunking auto|off]  (off: store every file as a whole blob)\npublish REMOTE_DIR [LABEL]\nrecover REMOTE_DIR  (into a store path that does not exist)\nfork-writer [LABEL]  (give a copied store its own writer ID)\nremote-check REMOTE_DIR");
         return Ok(0);
     }
     let command = args.remove(0);
@@ -159,7 +161,8 @@ fn run() -> CliResult<i32> {
             }
         }
         "check" => {
-            let result = check(&root)?;
+            let deep = args.first().is_some_and(|a| a == "--deep");
+            let result = check_with(&root, deep)?;
             for warning in &result.warnings {
                 println!("warning: {}: {}", warning.path.display(), warning.message);
             }
@@ -167,7 +170,15 @@ fn run() -> CliResult<i32> {
                 println!("error: {}: {}", error.path.display(), error.message);
             }
             if result.clean() {
-                println!("ok: {} documents, {} blobs", result.documents, result.blobs);
+                let chunked = if result.packs > 0 {
+                    format!(", {} chunked in {} packs", result.chunked, result.packs)
+                } else {
+                    String::new()
+                };
+                println!(
+                    "ok: {} documents, {} blobs{chunked}",
+                    result.documents, result.blobs
+                );
             } else {
                 return Ok(1);
             }
@@ -202,6 +213,20 @@ fn run() -> CliResult<i32> {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+            for head in &doc.heads {
+                let stored = match lib.content.describe(&head.hash)? {
+                    Some(Stored::Blob) => "whole blob".to_string(),
+                    Some(Stored::Chunks { chunks, packs }) => {
+                        format!("{chunks} chunks in {packs} packs")
+                    }
+                    None => "missing".to_string(),
+                };
+                if doc.heads.len() > 1 {
+                    println!("stored:    {stored} ({})", short(&head.id));
+                } else {
+                    println!("stored:    {stored}");
+                }
+            }
             println!(
                 "tags:      {}",
                 doc.tags.into_iter().collect::<Vec<_>>().join(", ")
@@ -318,6 +343,16 @@ fn run() -> CliResult<i32> {
                 return Ok(1);
             }
         }
+        "config" => match args.as_slice() {
+            [] => println!("chunking: {}", StoreConfig::load(&root)?.chunking),
+            [key, value] if key == "chunking" => {
+                let mut config = StoreConfig::load(&root)?;
+                config.chunking = value.parse::<Chunking>()?;
+                config.save(&root)?;
+                println!("chunking: {}", config.chunking);
+            }
+            _ => return Err("usage: config [chunking auto|off]".into()),
+        },
         _ => return Err(format!("unknown command: {command}").into()),
     }
     Ok(0)
