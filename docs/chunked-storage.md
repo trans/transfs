@@ -152,8 +152,9 @@ asks of anyone publishing a record; it costs one read of the file.
   check its identity, and concatenate. A whole blob is read directly, as now.
 - **A ranged read** (the mount reading *n* bytes at offset *o*): find the chunk
   holding byte *o* with one walk down the list, then read chunks from there
-  until *n* bytes are served. Recently read chunks are kept decompressed in a
-  small cache, since programs read files in pieces. The file's size comes from
+  until *n* bytes are served. The last sixteen chunk lists stay loaded, keyed
+  by the list's own identity, so a file read in pieces, or several files read
+  at once, don't reload their lists. The file's size comes from
   the list's total length.
 - **Integrity:** a chunk's identity comes from its uncompressed bytes, so
   checking it means decompressing and hashing it: about 500 MB/s per core,
@@ -329,9 +330,14 @@ In slices, each usable on its own:
    golden values, SQLite pages), representation records, local packs with
    compressed chunks, the store setting, chunked `add`, `addversion`, `cat` and
    `read_version`, size and type in the index, the mount (correct ranged
-   reads, without a chunk cache yet), `check` and `check --deep`. Until step 4,
+   reads), `check` and `check --deep`. Until step 4,
    `publish` rebuilds chunked versions and uploads them as whole blobs.
-3. **The mount:** ranged reads through the chunk list, with a chunk cache.
+3. **The mount.** Measured first, 2026-10-07: reading a 64 MB chunked file
+   through a live mount took 0.1 s (about 690 MB/s) with no chunk cache, so
+   none was built. Two files read at once took 1.65 times longer than they
+   should, because only one chunk list stayed loaded; keeping sixteen fixed
+   it (0.36 s down to 0.19 s). A chunk cache can come later if a real
+   workload, such as random access to large files, needs it.
 4. **Publish and recover:** records and packs to and from a remote, and
    publish state kept per remote, so one store can publish to several. The
    per-remote state is done (2026-10-07); remotes still receive whole blobs.
