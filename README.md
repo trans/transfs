@@ -121,6 +121,18 @@ Stores published with the older manually supplied writer ID start a new
 writer chain on their first publish with this version; the old refs remain
 readable during recovery.
 
+A store can publish to several remotes, which is how to keep copies with more
+than one provider or on more than one disk. Each remote has its own chain of
+refs from the writer, and any one of them can rebuild the store:
+
+```sh
+transfs --store laptop/store publish /mnt/nas/transfs
+transfs --store laptop/store publish /media/usb/transfs
+```
+
+A remote keeps its own id in `remote.json`, so it is the same remote wherever
+it is mounted.
+
 The recovery target must not exist. A remote stores immutable blobs and CHAMP
 packs plus append-only writer refs; it does not contain the live claim logs or
 SQLite database. Recovery unions all published writer roots and rebuilds the

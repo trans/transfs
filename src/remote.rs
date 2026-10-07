@@ -1,5 +1,9 @@
 //! Passive directory remote. Every published file is complete and immutable.
-use crate::{cas::sync_dir, Error, Result};
+use crate::{
+    cas::sync_dir,
+    writer::{mint_id, valid_ulid},
+    Error, Result,
+};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::{
@@ -17,6 +21,7 @@ const PENDING_PREFIX: &[u8] = b"\0TRANSFS-PENDING-1\n";
 pub struct DirectoryRemote {
     root: PathBuf,
     capabilities: Arc<OnceLock<RemoteCapabilities>>,
+    id: Arc<OnceLock<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +40,8 @@ pub trait RemoteStore: Send + Sync {
     fn put_pack(&self, bytes: &[u8]) -> Result<String>;
     fn get_pack(&self, hash: &str) -> Result<Vec<u8>>;
     fn publish_ref(&self, writer: &str, sequence: u64, bytes: &[u8]) -> Result<bool>;
+    /// The remote's own id, stable wherever the remote is reached from.
+    fn remote_id(&self) -> Result<String>;
     fn writers(&self) -> Result<Vec<String>>;
     fn refs_for(&self, writer: &str) -> Result<Vec<(u64, Vec<u8>)>>;
 }
@@ -44,7 +51,36 @@ impl DirectoryRemote {
         Self {
             root: root.into(),
             capabilities: Arc::new(OnceLock::new()),
+            id: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// This remote's own id, kept in `remote.json` at its root and created on
+    /// first use. A working store keys its publish state by it, so a remote
+    /// keeps its identity wherever it is mounted.
+    pub fn remote_id(&self) -> Result<String> {
+        if let Some(id) = self.id.get() {
+            return Ok(id.clone());
+        }
+        let path = self.root.join("remote.json");
+        let id = match read_remote_id(&path)? {
+            Some(id) => id,
+            None => {
+                let bytes = serde_json::to_vec(&serde_json::json!({
+                    "format": 1,
+                    "id": mint_id()?,
+                }))
+                .map_err(|e| Error::Storage(format!("cannot encode remote id: {e}")))?;
+                ensure_dir(&self.root)?;
+                // If another publisher created it first, theirs stands.
+                write_once_ref(&path, &bytes, self.write_capabilities()?)?;
+                read_remote_id(&path)?.ok_or_else(|| {
+                    Error::Storage("the remote's id is still being written; try again".into())
+                })?
+            }
+        };
+        let _ = self.id.set(id.clone());
+        Ok(id)
     }
 
     pub fn root(&self) -> &Path {
@@ -224,6 +260,10 @@ impl RemoteStore for DirectoryRemote {
         DirectoryRemote::publish_ref(self, writer, sequence, bytes)
     }
 
+    fn remote_id(&self) -> Result<String> {
+        DirectoryRemote::remote_id(self)
+    }
+
     fn writers(&self) -> Result<Vec<String>> {
         DirectoryRemote::writers(self)
     }
@@ -254,6 +294,31 @@ pub(crate) fn valid_hash(hash: &str) -> Result<()> {
         return Err(Error::Storage(format!("invalid SHA-256 hash: {hash}")));
     }
     Ok(())
+}
+
+/// The id in a remote's `remote.json`, or nothing if it has none yet (or its
+/// creation was interrupted before the bytes were written).
+fn read_remote_id(path: &Path) -> Result<Option<String>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let Some(json) = decode_ref(&bytes)? else {
+        return Ok(None);
+    };
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RemoteFile {
+        format: u8,
+        id: String,
+    }
+    let file: RemoteFile = serde_json::from_slice(&json)
+        .map_err(|e| Error::Storage(format!("invalid remote.json: {e}")))?;
+    if file.format != 1 || !valid_ulid(&file.id) {
+        return Err(Error::Storage("invalid remote.json".into()));
+    }
+    Ok(Some(file.id))
 }
 
 pub(crate) fn hash_bytes(bytes: &[u8]) -> String {

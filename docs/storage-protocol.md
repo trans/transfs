@@ -17,6 +17,7 @@ synchronous; a browser adapter will need an asynchronous boundary.
 blobs/<hh>/<sha256>             complete file bytes; hh is the first two hex digits
 packs/<sha256>                  immutable indexed pack of CHAMP nodes
 refs/<writer>/<sequence>       immutable writer ref; sequence is 20 decimal digits
+remote.json                     the remote's own id, written once
 ```
 
 `reps/` is reserved for alternative byte representations. Hashes are lowercase
@@ -24,6 +25,12 @@ SHA-256 hex. Writer IDs contain only ASCII letters, digits, `_`, and `-`.
 Working stores mint a 26-character Crockford base32 ID with a 48-bit
 millisecond timestamp and 80 OS-random bits. The optional human label is kept
 separately in `.transfs/writer.json`. A recovered store gets a new ID.
+
+A remote's `remote.json` holds `{"format":1,"id":...}`, an id in the same form
+as a writer ID, created by the first publish with the same write-once rule as
+a ref. Working stores key their publish state by it, so a remote keeps its
+identity wherever it is mounted: a USB drive at a different path is still the
+same remote.
 
 `remote-check` probes exclusive create, hard links, rename replacement, and
 directory sync on the actual remote filesystem. Publication probes once per
@@ -105,8 +112,10 @@ Logical ref bytes are JSON with fields `format` (currently `1`), `writer`, `sequ
 `previous` (the SHA-256 of the prior ref bytes, or null), `root` (CHAMP node
 hash), and `packs` (ordered pack hashes). Sequences begin at 1. A new ref
 extends the prior pack list. The previous-ref hash and gap checks detect
-broken chains. A writer ID belongs to one working store. Its `writer.json`
-records the hash of the last ref it published. Before publishing, it saves
+broken chains. A writer ID belongs to one working store. A store may publish
+to several remotes; each remote has its own chain of refs from the writer,
+starting at sequence 1. For each remote id, `writer.json` records the hash of
+the last ref it published there. Before publishing, it saves
 and syncs the exact pending ref bytes, sequence, and hash. On restart, a
 matching remote tip is adopted, or an unpublished pending ref is retried.
 Publish holds the local store lock through the remote publication and local
@@ -116,7 +125,9 @@ either copy advances. If two
 copied stores race from the same recorded tip, conditional create chooses one;
 the loser must not reread and braid the two devices into one writer chain.
 `fork-writer` gives the losing copy a fresh ID and keeps its local claims.
-The current state tracks one remote lineage per working store.
+A `writer.json` from before publish state was kept per remote (format 1, with
+one `last_ref`) still loads; its state is assigned to the first remote whose
+tip is that ref.
 Newly minted writer IDs are uppercase Crockford base32; legacy manually named
 writer directories remain readable. Unknown OS metadata files under `refs/`
 are ignored, while two writer directories differing only by case are rejected.
@@ -143,10 +154,7 @@ backend has only been verified on the local filesystem; NAS and USB semantics
 still need direct tests. Directory sync may be unsupported on some NAS shares;
 the current implementation refuses publication there until tested and a safe
 durability rule is established. FAT32's 4 GiB file limit prevents storing
-larger blobs or packs on it. Remotes provide no authentication or writer roster yet. A working store
-can publish to only one remote: `writer.json` holds one last-published ref, so
-publishing to a second remote is refused as if another device owned the writer.
-Publishing to several remotes for redundancy needs publish state per remote.
+larger blobs or packs on it. Remotes provide no authentication or writer roster yet.
 A working store may keep versions as chunks (`docs/chunked-storage.md`), but
 remotes still hold whole blobs: `publish` rebuilds a chunked version, checks it
 against its hash and uploads it as a blob, until representation records and

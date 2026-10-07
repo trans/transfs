@@ -245,12 +245,10 @@ such as a directory remote on a NAS or USB drive, or a second provider. Each
 remote also needs checking now and then: fetching its objects and verifying
 their hashes, so damage there is found while another copy still exists.
 
-**Not possible yet:** a working store can publish to only one remote. Its
-`writer.json` records one last-published ref, so a second remote, which has no
-refs yet, looks like another device using the same writer, and publishing is
-refused (tested 2026-10-06). The fix is to keep publish state per remote:
-each remote gets its own last-ref and pending-ref entry, keyed by an id stored
-in the remote. That belongs before any store relies on remotes for safety.
+**Several remotes:** a working store publishes to each remote separately, and
+keeps what it last published to each, keyed by an id the remote stores in its
+own `remote.json` (done 2026-10-07). Until then a second remote was refused as
+if another device owned the writer.
 
 ## Format parameters
 
@@ -335,7 +333,8 @@ In slices, each usable on its own:
    `publish` rebuilds chunked versions and uploads them as whole blobs.
 3. **The mount:** ranged reads through the chunk list, with a chunk cache.
 4. **Publish and recover:** records and packs to and from a remote, and
-   publish state kept per remote, so one store can publish to several.
+   publish state kept per remote, so one store can publish to several. The
+   per-remote state is done (2026-10-07); remotes still receive whole blobs.
 5. **Dictionaries** for large SQLite databases.
 6. **Speed:** compressing chunks on several cores, and packing small packs
    together.

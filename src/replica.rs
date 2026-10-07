@@ -8,7 +8,7 @@ use crate::{
     log::{Log, StoreLock},
     pack,
     remote::{ensure_dir, hash_bytes, valid_hash, valid_writer, RemoteStore},
-    writer::{PendingRef, WriterState},
+    writer::{PendingRef, RemoteState, WriterState},
     Error, Result,
 };
 use merkle_champ::{ChampMap, Identity, Objects};
@@ -68,12 +68,15 @@ pub fn fork_writer(root: &Path, label: Option<&str>) -> Result<(String, String)>
 
 /// Publish a self-contained checkpoint after all referenced bytes are durable.
 /// The optional label is for display; the store's durable ID owns the ref chain.
+/// A store may publish to several remotes: each has its own chain of refs from
+/// this writer, and the store keeps what it last published to each.
 pub fn publish(
     library: &Library,
     remote: &dyn RemoteStore,
     label: Option<&str>,
 ) -> Result<PublishReport> {
     let _lock = StoreLock::acquire(&library.root)?;
+    let remote_id = remote.remote_id()?;
     let mut state = WriterState::load_or_create(&library.root)?;
     if let Some(label) = label {
         state.label = Some(label.to_owned());
@@ -81,8 +84,17 @@ pub fn publish(
     let writer = state.id.clone();
     valid_writer(&writer)?;
     let mut previous = latest_ref(remote, &writer)?;
-    reconcile_pending(&mut state, remote, &library.root, &mut previous)?;
-    if previous.as_ref().map(|published| published.hash.as_str()) != state.last_ref.as_deref() {
+    let tip = previous.as_ref().map(|published| published.hash.clone());
+    let mut here = state.remote(&remote_id, tip.as_deref());
+    reconcile_pending(
+        &mut state,
+        &remote_id,
+        &mut here,
+        remote,
+        &library.root,
+        &mut previous,
+    )?;
+    if previous.as_ref().map(|published| published.hash.as_str()) != here.last_ref.as_deref() {
         return Err(Error::Storage(format!(
             "another device is publishing as writer {writer}; remote tip differs from this store's last published ref"
         )));
@@ -156,19 +168,21 @@ pub fn publish(
     let bytes = serde_json::to_vec(&reference)
         .map_err(|e| Error::Storage(format!("cannot encode writer ref: {e}")))?;
     let hash = hash_bytes(&bytes);
-    state.pending = Some(PendingRef {
+    here.pending = Some(PendingRef {
         sequence,
         hash: hash.clone(),
         json: String::from_utf8(bytes.clone()).expect("JSON is UTF-8"),
     });
+    state.set_remote(&remote_id, here.clone());
     state.save(&library.root)?;
     if !remote.publish_ref(&writer, sequence, &bytes)? {
         return Err(Error::Storage(format!(
             "writer ref {writer}/{sequence} is occupied; another device may own this writer, or an interrupted ref needs repair"
         )));
     }
-    state.last_ref = Some(hash);
-    state.pending = None;
+    here.last_ref = Some(hash);
+    here.pending = None;
+    state.set_remote(&remote_id, here);
     state.save(&library.root)?;
     Ok(PublishReport {
         writer,
@@ -178,13 +192,17 @@ pub fn publish(
     })
 }
 
+/// Settles a ref this store was about to publish to this remote when it was
+/// interrupted: adopts it if the remote has it, or publishes it now.
 fn reconcile_pending(
     state: &mut WriterState,
+    remote_id: &str,
+    here: &mut RemoteState,
     remote: &dyn RemoteStore,
     root: &Path,
     previous: &mut Option<PublishedRef>,
 ) -> Result<()> {
-    let Some(pending) = state.pending.clone() else {
+    let Some(pending) = here.pending.clone() else {
         return Ok(());
     };
     let reference: WriterRef = serde_json::from_str(&pending.json)
@@ -192,7 +210,7 @@ fn reconcile_pending(
     if reference.format != 1
         || reference.writer != state.id
         || reference.sequence != pending.sequence
-        || reference.previous != state.last_ref
+        || reference.previous != here.last_ref
     {
         return Err(Error::Storage(
             "pending writer ref does not match local state".into(),
@@ -200,12 +218,13 @@ fn reconcile_pending(
     }
     let tip = previous.as_ref().map(|published| published.hash.as_str());
     if tip == Some(pending.hash.as_str()) {
-        state.last_ref = Some(pending.hash);
-        state.pending = None;
+        here.last_ref = Some(pending.hash);
+        here.pending = None;
+        state.set_remote(remote_id, here.clone());
         state.save(root)?;
         return Ok(());
     }
-    if tip != state.last_ref.as_deref() {
+    if tip != here.last_ref.as_deref() {
         return Err(Error::Storage(format!(
             "another device is publishing as writer {}; remote tip differs from the pending ref",
             state.id
@@ -217,8 +236,9 @@ fn reconcile_pending(
             state.id, pending.sequence
         )));
     }
-    state.last_ref = Some(pending.hash.clone());
-    state.pending = None;
+    here.last_ref = Some(pending.hash.clone());
+    here.pending = None;
+    state.set_remote(remote_id, here.clone());
     state.save(root)?;
     *previous = latest_ref(remote, &state.id)?;
     Ok(())

@@ -224,13 +224,14 @@ fn a_lost_local_ref_update_adopts_the_exact_pending_ref() {
     let body = file(&dir, "body", b"body");
     let doc = store.add(&body, Some("first.txt")).unwrap();
     let first = publish(&store, &remote, None).unwrap();
+    let remote_id = remote.remote_id().unwrap();
     let state_path = store.root.join(".transfs/writer.json");
     let old_state = fs::read(&state_path).unwrap();
     store.rename(&doc, "second.txt").unwrap();
     let second = publish(&store, &remote, None).unwrap();
     let second_bytes = remote.refs_for(&first.writer).unwrap()[1].1.clone();
     let mut state: serde_json::Value = serde_json::from_slice(&old_state).unwrap();
-    state["pending"] = serde_json::json!({
+    state["remotes"][&remote_id]["pending"] = serde_json::json!({
         "sequence": second.sequence,
         "hash": hex::encode(Sha256::digest(&second_bytes)),
         "json": String::from_utf8(second_bytes).unwrap()
@@ -239,8 +240,11 @@ fn a_lost_local_ref_update_adopts_the_exact_pending_ref() {
     assert!(!publish(&store, &remote, None).unwrap().changed);
     let repaired: serde_json::Value =
         serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
-    assert!(repaired["pending"].is_null());
-    assert_eq!(repaired["last_ref"], state["pending"]["hash"]);
+    assert!(repaired["remotes"][&remote_id]["pending"].is_null());
+    assert_eq!(
+        repaired["remotes"][&remote_id]["last_ref"],
+        state["remotes"][&remote_id]["pending"]["hash"]
+    );
     assert_eq!(remote.refs_for(&first.writer).unwrap().len(), 2);
 }
 
@@ -262,6 +266,9 @@ impl RemoteStore for FailBeforeRef<'_> {
     fn publish_ref(&self, _: &str, _: u64, _: &[u8]) -> transfs::Result<bool> {
         Err(transfs::Error::Storage("simulated interruption".into()))
     }
+    fn remote_id(&self) -> transfs::Result<String> {
+        self.0.remote_id()
+    }
     fn writers(&self) -> transfs::Result<Vec<String>> {
         self.0.writers()
     }
@@ -281,7 +288,7 @@ fn pending_ref_is_retried_after_interruption_before_remote_publication() {
     let state: serde_json::Value =
         serde_json::from_slice(&fs::read(store.root.join(".transfs/writer.json")).unwrap())
             .unwrap();
-    assert!(state["pending"].is_object());
+    assert!(state["remotes"][&remote.remote_id().unwrap()]["pending"].is_object());
     let report = publish(&store, &remote, None).unwrap();
     assert!(!report.changed);
     assert_eq!(remote.refs_for(&report.writer).unwrap().len(), 1);
@@ -395,4 +402,84 @@ fn cli_publishes_and_recovers_a_checkable_store() {
     run(&restored, "recover", &[remote.as_os_str()]);
     assert!(run(&restored, "check", &[]).contains("ok: 1 documents, 1 blobs"));
     assert!(run(&restored, "list", &[]).contains("note.txt"));
+}
+
+#[test]
+fn one_store_publishes_to_two_remotes() {
+    let dir = TempDir::new().unwrap();
+    let store = Library::new(dir.path().join("working"));
+    let a = DirectoryRemote::new(dir.path().join("cloud"));
+    let b = DirectoryRemote::new(dir.path().join("usb"));
+    let doc = store
+        .add(&file(&dir, "body", b"body"), Some("first.txt"))
+        .unwrap();
+    assert_eq!(publish(&store, &a, None).unwrap().sequence, 1);
+    assert_eq!(publish(&store, &b, None).unwrap().sequence, 1);
+    store.rename(&doc, "renamed.txt").unwrap();
+    assert_eq!(publish(&store, &a, None).unwrap().sequence, 2);
+    assert_eq!(publish(&store, &b, None).unwrap().sequence, 2);
+    assert_ne!(a.remote_id().unwrap(), b.remote_id().unwrap());
+
+    // Each remote alone rebuilds the store.
+    for (remote, name) in [(&a, "from-cloud"), (&b, "from-usb")] {
+        let target = dir.path().join(name);
+        recover(remote, &target).unwrap();
+        let restored = Library::new(&target).document(&doc.id).unwrap().unwrap();
+        assert_eq!(restored.name.as_deref(), Some("renamed.txt"));
+    }
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.root.join(".transfs/writer.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["remotes"].as_object().unwrap().len(), 2);
+}
+
+#[test]
+fn a_remote_keeps_its_id_when_mounted_elsewhere() {
+    let dir = TempDir::new().unwrap();
+    let store = Library::new(dir.path().join("working"));
+    let doc = store
+        .add(&file(&dir, "body", b"body"), Some("a.txt"))
+        .unwrap();
+    let here = DirectoryRemote::new(dir.path().join("mnt-one"));
+    publish(&store, &here, None).unwrap();
+    let id = here.remote_id().unwrap();
+    fs::rename(dir.path().join("mnt-one"), dir.path().join("mnt-two")).unwrap();
+    let moved = DirectoryRemote::new(dir.path().join("mnt-two"));
+    assert_eq!(moved.remote_id().unwrap(), id);
+    store.rename(&doc, "b.txt").unwrap();
+    assert_eq!(publish(&store, &moved, None).unwrap().sequence, 2);
+}
+
+#[test]
+fn old_writer_state_goes_to_the_remote_that_proves_it() {
+    // writer.json from before publish state was kept per remote: one
+    // last_ref, for an unnamed remote.
+    let dir = TempDir::new().unwrap();
+    let store = Library::new(dir.path().join("working"));
+    let doc = store
+        .add(&file(&dir, "body", b"body"), Some("a.txt"))
+        .unwrap();
+    let old = DirectoryRemote::new(dir.path().join("old"));
+    let first = publish(&store, &old, None).unwrap();
+    let tip = hex::encode(Sha256::digest(&old.refs_for(&first.writer).unwrap()[0].1));
+    let path = store.root.join(".transfs/writer.json");
+    fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({
+            "format": 1, "id": first.writer, "label": null, "last_ref": tip, "pending": null
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // A new remote starts its own chain; the old state stays unassigned.
+    let fresh = DirectoryRemote::new(dir.path().join("fresh"));
+    assert_eq!(publish(&store, &fresh, None).unwrap().sequence, 1);
+    // The old remote's tip is the old last_ref, so the state is its.
+    store.rename(&doc, "b.txt").unwrap();
+    assert_eq!(publish(&store, &old, None).unwrap().sequence, 2);
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(state["format"], 2);
+    assert!(state.get("unassigned").is_none());
+    assert_eq!(state["remotes"].as_object().unwrap().len(), 2);
 }
