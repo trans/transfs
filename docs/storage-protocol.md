@@ -143,4 +143,7 @@ backend has only been verified on the local filesystem; NAS and USB semantics
 still need direct tests. Directory sync may be unsupported on some NAS shares;
 the current implementation refuses publication there until tested and a safe
 durability rule is established. FAT32's 4 GiB file limit prevents storing
-larger blobs or packs on it. Remotes provide no authentication or writer roster yet.
+larger blobs or packs on it. Remotes provide no authentication or writer roster yet. A working store
+can publish to only one remote: `writer.json` holds one last-published ref, so
+publishing to a second remote is refused as if another device owned the writer.
+Publishing to several remotes for redundancy needs publish state per remote.

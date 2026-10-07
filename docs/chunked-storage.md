@@ -2,8 +2,9 @@
 
 > **Status:** proposal for review, 2026-10-06. Nothing here is built. It turns
 > the [chunk study](chunk-study.md) and the [file-type table](file-types.md)
-> into a storage design. Two pieces need merkle-champ work first
-> ([what it needs from merkle-champ](#what-it-needs-from-merkle-champ)).
+> into a storage design. The two merkle-champ pieces it needs are built:
+> loading a stored `Sequence` (`ad0797e`) and compressed pack members
+> (`6b1197c`); see [what it needs from merkle-champ](#what-it-needs-from-merkle-champ).
 
 Today transfs stores every version of a file as one complete blob. Saving a
 3.5 MB GIMP master after a small brush stroke stores another 3.5 MB. With
@@ -99,7 +100,10 @@ for the images they serve, with no change to either.
 }
 ```
 
-`chunking` is either the FastCDC parameters or `fixed/<page size>`. `packs`
+`root` is the chunk list's own identity, the value `Sequence::save` returns,
+not the identity of the list's top node: loading starts from the list's
+header object, which holds its length and top node. `chunking` is either the
+FastCDC parameters or `fixed/<page size>`. `packs`
 lists every pack holding this version's list nodes or chunks, so a reader that
 has only the record (a remote, or a store being recovered) knows what to fetch.
 A later field can name a compression dictionary. The record's id is the SHA-256
@@ -117,8 +121,13 @@ that is chunked:
 3. For each chunk, look up its identity in the index. Compress the new ones
    with zstd level 3, keeping the raw bytes when compression does not shrink
    them.
-4. Build the chunk list and save its nodes. Write one pack holding the new
-   nodes and new chunks, fsync it, and add its objects to the index.
+4. Build the chunk list and save it. Saving writes every node, so drop the
+   objects the index already has. Write one pack holding the new nodes and new
+   chunks, rooted at the list's identity, fsync it, and add its objects to the
+   index. Every new node's ancestors are new too, so the root still reaches
+   everything in the pack. A very large version may instead be split into
+   several packs, each rooted at a subtree of the list, with the list's header
+   object in the top one.
 5. Write the representation record and fsync it.
 6. Append the version claim, as today.
 
@@ -143,7 +152,18 @@ asks of anyone publishing a record; it costs one read of the file.
   against about 850 MB/s for decompression alone. Instead, every compressed
   chunk carries zstd's own 4-byte checksum, checked as it decompresses; on the
   study's data it cost nothing measurable. That catches damage on every local
-  read. The full identity check (SHA-256 of the decompressed bytes) is made
+  read. It catches corruption, not substitution (anyone can write a valid
+  checksum for different content), so it is relied on only for packs the
+  store wrote to its own disk.
+- **Bounded sizes:** before decompressing, a reader checks each member's
+  declared decoded length against what it expects, so a damaged or hostile
+  pack cannot make it allocate without limit. A stored chunk is the 20-byte
+  blob prefix plus the chunk, so the bound is 32 KiB + 20 bytes for a FastCDC
+  chunk and the page size + 20 for a SQLite chunk.
+- **In a browser:** transfs's core builds for WASM, where the usual `zstd`
+  crate, which wraps the C library, does not; reading compressed chunks there
+  needs a pure-Rust decoder. Pandora's browser needs the same, so it is asked
+  of merkle-champ's `zstd` feature. The full identity check (SHA-256 of the decompressed bytes) is made
   where trust changes: on objects fetched from a remote or another store, and
   in `check`. Moving whole packs needs neither, because a pack is named by the
   SHA-256 of its bytes. Today transfs does not check blobs on read at all, so
@@ -175,11 +195,54 @@ from chunks.
 
 A dictionary helped only when trained on the file's own content: a large SQLite
 database gets its own, about 110 KiB, trained on its first stored version and
-reused for its later versions. This proposal leaves dictionaries to a later
-step. The first version compresses without them, which already captures most
+reused for its later versions. In the agreed pack format, a member compressed
+with a dictionary names it by its position in the same pack, so every pack
+that uses a dictionary carries its own copy. That gives each dictionary as many
+copies as packs that use it, at about 110 KiB per pack, so the writer uses a
+dictionary only in packs big enough to repay it (a database's first version, a
+large batch of changes) and plain zstd in small ones. This proposal leaves
+dictionaries to a later step. The first version compresses without them, which already captures most
 of the saving (Codex's logs: 7.1% of a whole-file copy per version without a
 dictionary, 4.9% with), and a dictionary can be added later without changing
 any identity, because chunks are identified by their uncompressed bytes.
+
+## Safety and redundancy
+
+transfs detects damage everywhere: chunks, list nodes, dictionaries, packs and
+records are all checked against their hashes, so damage shows up as an error,
+never as wrong bytes. Detection is not repair. Repair needs another copy, and
+chunked storage makes copies matter more:
+
+- **Shared fate.** A chunk stored once is used by every version and every file
+  that contains it, so one damaged chunk breaks all of them. Whole blobs share
+  fate the same way, one file's worth at a time.
+- **Compression makes damage all-or-nothing.** One flipped bit ruins a whole
+  compressed chunk, where an uncompressed file would lose a few bytes.
+  Chunking caps the loss at about 8 KiB.
+- **A dictionary is a dependency.** Every chunk compressed with a dictionary
+  needs it to decompress, so losing one dictionary loses all of those chunks.
+  When dictionaries are added: one per database, never one for a whole store,
+  so a loss stays within one database; at least two copies locally and one on
+  every remote, which is cheap because they are about 110 KiB and rare; `check`
+  verifies every dictionary and that each chunk's dictionary is present, and
+  restores a damaged one from another copy; and a dictionary can be retired by
+  recompressing its chunks without it, which changes no identity. Every pack
+  that uses a dictionary carries its own copy, so a dictionary has as many
+  copies as packs that use it.
+
+**More than one remote.** No single provider should hold the only other copy.
+Each remote is complete on its own (blobs, packs, records and refs), so any
+one can rebuild a store. A sound setup is R2 plus a different kind of remote,
+such as a directory remote on a NAS or USB drive, or a second provider. Each
+remote also needs checking now and then: fetching its objects and verifying
+their hashes, so damage there is found while another copy still exists.
+
+**Not possible yet:** a working store can publish to only one remote. Its
+`writer.json` records one last-published ref, so a second remote, which has no
+refs yet, looks like another device using the same writer, and publishing is
+refused (tested 2026-10-06). The fix is to keep publish state per remote:
+each remote gets its own last-ref and pending-ref entry, keyed by an id stored
+in the remote. That belongs before any store relies on remotes for safety.
 
 ## Format parameters
 
@@ -191,18 +254,27 @@ they cut and identify them the same way:
   format and is copied into the spec, not left to a library version.
 - SQLite: fixed chunks of the page size in bytes 16–17 of the header (a stored
   value of 1 means 65,536).
-- Chunk identity (see below), and the chunk list's element encoding.
+- Chunk identity (see below), and the chunk list's element encoding, which
+  must hold each chunk's full 32-byte identity as contiguous bytes: that is how
+  a pack finds the reference and places the chunk right after the leaf that
+  names it.
 
 ## What it needs from merkle-champ
 
 Two pieces are merkle-champ's to provide; they are @march-claude's call, and
 this proposal only states the need.
 
-1. **Loading a stored `Sequence`.** merkle-champ saves a sequence's nodes but
-   does not yet load them (its `FORMAT.md`, section 10.8). Reading a chunk list
-   needs it. For very large files, loading only the nodes along one path
-   (which `PERSISTENCE.md` already sketches) would keep a ranged read from
-   loading a whole list.
+1. **Loading a stored `Sequence`.** Done in merkle-champ `ad0797e`:
+   `Sequence::save` and `Sequence::load`, with no format change. For 78,000
+   chunks, saving takes about 4 ms and loading about 7 ms, and a version with
+   one chunk inserted adds 6 objects. `Objects::extend` merges the objects of
+   a version's several packs before loading. Loading only the nodes along one
+   path, so a ranged read of a very large file need not load its whole list,
+   comes later. A few objects with repeated subtrees can describe a very long
+   list, so a list from a remote or peer is checked before loading: its stored
+   length counts chunks, and may be at most the record's byte length ÷ 2048 + 1
+   for FastCDC, or exactly the byte length ÷ page size, rounded up, for SQLite.
+   After loading, the list's byte total must equal the record's length.
 2. **Compressed chunks in packs.** A merkle-champ blob's identity already
    comes from its uncompressed content, `SHA-256("merkle-champ/blob/v1" ||
    content)`, which is what chunks need: the same chunk has the same identity
@@ -210,7 +282,19 @@ this proposal only states the need.
    object as exactly the bytes its identity hashes, and checks an object by
    hashing what is stored, so a pack can hold a chunk only uncompressed. Packs
    need to separate what an object is (its identity) from how it is stored
-   (its bytes in the pack). Two ways to get there:
+   (its bytes in the pack). @march-claude has drafted the first of the two
+   ways below as an MCHPACK2 amendment (merkle-champ `PACK-ENCODING.md`):
+   flagged packs with 64-byte index entries giving each member's encoding
+   (raw, zstd, or zstd with a dictionary in the same pack) and decoded
+   length; full SHA-256 verification by default, with zstd's checksum as an
+   explicit trusted mode for bytes already trusted. transfs and @pandora
+   agreed, and it is built (`6b1197c`, merkle-champ `FORMAT.md` section 11.3):
+   `pack::encode_members` takes each chunk raw or as a zstd frame transfs has
+   already compressed; a frame holds the chunk's content without the blob
+   prefix and records its content size; a dictionary a member uses is always
+   in the same pack; reading uses the `zstd` feature natively and `ruzstd`
+   (pure Rust) for WASM, with `ReadOptions` setting the decoded-size bound and
+   whether to trust checksums. The two ways considered were:
    - **Recommended: MCHPACK2 learns compressed members.** A pack member may be
      stored as a zstd frame; a reader decompresses it and checks the identity
      against the decompressed bytes, so identities stay exactly as they are.
@@ -224,33 +308,30 @@ this proposal only states the need.
      It needs nothing from merkle-champ, but it is a second pack format, and
      Pandora would not share it.
 
-**Chunk identity** follows from that choice. If chunks are merkle-champ blobs,
-a chunk's identity is `SHA-256("merkle-champ/blob/v1" || chunk)`; otherwise it
-could be the plain SHA-256 of the chunk. Either works. The domain-prefixed form
-is what merkle-champ packs already use, and it keeps a chunk from ever sharing
-an identity with a list node. The whole-file hash *H* in version claims stays
-the plain SHA-256 of the file either way.
+**Chunk identity:** chunks are merkle-champ blobs, so a chunk's identity is
+`SHA-256("merkle-champ/blob/v1" || chunk)`. That keeps a chunk from ever
+sharing an identity with a list node, and it is what packs check. The
+whole-file hash *H* in version claims stays the plain SHA-256 of the file.
 
 ## Building it
 
 In slices, each usable on its own:
 
-1. **merkle-champ:** loading a stored `Sequence`, and compressed pack members
-   (or the decision to keep transfs's own chunk packs).
+1. **merkle-champ:** loading a stored `Sequence`, and compressed pack members.
+   Done (`ad0797e`, `6b1197c`).
 2. **Write and read:** the chunkers, representation records, local packs and
    the object index; `add`, `addversion`, `cat` and `read_version` on chunked
    files; size and type in the index; `check`. Files under the threshold and
    already-compressed media keep going to whole blobs.
 3. **The mount:** ranged reads through the chunk list, with a chunk cache.
-4. **Publish and recover:** records and packs to and from a remote.
+4. **Publish and recover:** records and packs to and from a remote, and
+   publish state kept per remote, so one store can publish to several.
 5. **Dictionaries** for large SQLite databases.
 6. **Speed:** compressing chunks on several cores, and packing small packs
    together.
 
 ## Open questions
 
-- **Compressed pack members, or transfs's own chunk packs** (above), and with
-  it the form of a chunk's identity.
 - **The small-file threshold.** 32 KiB is a guess; it should be where a chunk
   list and pack entries cost about what chunking saves.
 - **Compress when writing, or later in the background.** Writing compressed is
